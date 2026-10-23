@@ -1,6 +1,8 @@
 package no.oktodrive.app
 
 import android.app.Activity
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
@@ -27,6 +29,40 @@ import android.widget.Toast
  * Never display a fake connected state or claim that PTT transmits audio.
  */
 class MainActivity : Activity() {
+
+    private val prefs by lazy { getSharedPreferences("server_settings", MODE_PRIVATE) }
+
+    /**
+     * Tests TLS reachability only. This is NOT a Mumble login/session.
+     * Keep PTT disabled until the actual Mumble protocol and audio are implemented.
+     */
+    private fun testServer(host: String, port: Int, status: TextView, button: Button) {
+        status.text = "●  Tester server …"
+        status.setTextColor(muted)
+        button.isEnabled = false
+        Thread {
+            val result = try {
+                val socket = SSLSocketFactory.getDefault().createSocket() as SSLSocket
+                socket.use {
+                    it.soTimeout = 6000
+                    it.connect(java.net.InetSocketAddress(host, port), 6000)
+                    it.startHandshake()
+                }
+                "TLS-kontakt OK. Mumble-innlogging er ennå ikke implementert."
+            } catch (e: Exception) {
+                "Kunne ikke nå serveren: ${e.localizedMessage ?: e.javaClass.simpleName}"
+            }
+            runOnUiThread {
+                status.text = "●  Ikke tilkoblet"
+                status.setTextColor(Color.rgb(190, 55, 45))
+                button.isEnabled = true
+                AlertDialog.Builder(this)
+                    .setTitle("Servertest")
+                    .setMessage(result)
+                    .setPositiveButton("OK", null).show()
+            }
+        }.start()
+    }
 
     private val releaseApi = "https://api.github.com/repos/Oktopustrh/OktoDrive/releases/latest"
 
@@ -96,6 +132,8 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private lateinit var connectionStatus: TextView
+
     private val navy = Color.rgb(10, 49, 105)
     private val blue = Color.rgb(25, 118, 210)
     private val paleBlue = Color.rgb(235, 246, 255)
@@ -133,24 +171,26 @@ class MainActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(1, dp(height))
     }
 
-    private fun field(label: String, value: String = "", hint: String = "", focused: Boolean = false): LinearLayout {
-        return LinearLayout(this).apply {
+    private fun field(label: String, value: String = "", hint: String = "", focused: Boolean = false): Pair<LinearLayout, EditText> {
+        val input = EditText(this).apply {
+            setText(value)
+            this.hint = hint
+            textSize = 18f
+            setTextColor(navy)
+            setHintTextColor(Color.rgb(155, 165, 178))
+            setSingleLine(true)
+            background = null
+            setPadding(0, 0, 0, 0)
+        }
+        val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(10))
             background = rounded(Color.WHITE, 12, if (focused) blue else border, if (focused) 2 else 1)
 
             addView(text(label, 14f, if (focused) blue else muted))
-            addView(EditText(this@MainActivity).apply {
-                setText(value)
-                this.hint = hint
-                textSize = 18f
-                setTextColor(navy)
-                setHintTextColor(Color.rgb(155, 165, 178))
-                setSingleLine(true)
-                background = null
-                setPadding(0, 0, 0, 0)
-            })
+            addView(input)
         }
+        return layout to input
     }
 
     private fun card(): LinearLayout = LinearLayout(this).apply {
@@ -184,7 +224,7 @@ class MainActivity : Activity() {
         val titleBlock = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(text("OktoDrive", 28f, navy, true))
-            addView(text("●  Ikke tilkoblet", 17f, Color.rgb(190, 55, 45)))
+            addView(text("●  Ikke tilkoblet", 17f, Color.rgb(190, 55, 45)).also { connectionStatus = it })
         }
         header.addView(titleBlock, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
@@ -221,21 +261,38 @@ class MainActivity : Activity() {
         val serverCard = card()
         serverCard.addView(text("⚙  Serverinnstillinger", 22f, navy, true))
         serverCard.addView(spacer(14))
-        serverCard.addView(field("Adresse", "127.0.0.1"))
+        val (addressBox, addressInput) = field("Adresse", prefs.getString("host", "") ?: "", hint = "mumble.example.no")
+        serverCard.addView(addressBox)
         serverCard.addView(spacer(10))
-        serverCard.addView(field("Port (standard: 64738)", hint = "64738"))
+        val (portBox, portInput) = field("Port (standard: 64738)", prefs.getString("port", "64738") ?: "64738")
+        portInput.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        serverCard.addView(portBox)
         serverCard.addView(spacer(10))
-        serverCard.addView(field("Navn", "oktopus", focused = true))
+        val (nameBox, nameInput) = field("Navn", prefs.getString("name", "") ?: "")
+        serverCard.addView(nameBox)
         serverCard.addView(spacer(12))
 
-        serverCard.addView(Button(this).apply {
-            text = "🔗   KOBLE TIL (KOMMER SENERE)"
-            isEnabled = false
+        val testButton = Button(this).apply {
+            text = "🔗   TEST SERVERFORBINDELSE"
             textSize = 16f
             minHeight = dp(58)
-            background = rounded(Color.rgb(232, 239, 247), 12)
-            setTextColor(disabledText)
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            setTextColor(Color.WHITE)
+            background = rounded(blue, 12)
+        }
+        testButton.setOnClickListener {
+            val host = addressInput.text.toString().trim()
+            val port = portInput.text.toString().toIntOrNull()
+            val name = nameInput.text.toString().trim()
+            if (host.isBlank() || port == null || port !in 1..65535 || name.isBlank()) {
+                AlertDialog.Builder(this).setMessage("Fyll inn serveradresse, gyldig port og brukernavn.")
+                    .setPositiveButton("OK", null).show()
+            } else {
+                prefs.edit().putString("host", host).putString("port", port.toString())
+                    .putString("name", name).apply()
+                testServer(host, port, connectionStatus, testButton)
+            }
+        }
+        serverCard.addView(testButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         root.addView(serverCard)
         root.addView(spacer(14))
