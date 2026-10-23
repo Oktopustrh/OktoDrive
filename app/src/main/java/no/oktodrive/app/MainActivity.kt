@@ -190,7 +190,7 @@ class MainActivity : Activity() {
                     connectionStatus.text = "●  $message"
                     connectionStatus.setTextColor(if (connected) Color.rgb(25, 130, 65) else Color.rgb(190, 55, 45))
                     connectButton.text = if (connected) "KOBLE FRA" else "KOBLE TIL MUMBLE"
-                    connectButton.isEnabled = true
+                    connectButton.isEnabled = connected || message != "Kobler til Mumble …"
                 }
             }
             override fun onChannels(channels: List<MumbleClient.Channel>) {
