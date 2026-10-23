@@ -31,7 +31,8 @@ jobs:
         run: gradle --no-daemon :app:assembleDebug
       - name: Upload debug APK
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: oktodrive-debug-apk
+          archive: false
           path: app/build/outputs/apk/debug/*.apk
