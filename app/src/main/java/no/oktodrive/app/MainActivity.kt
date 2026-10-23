@@ -1,6 +1,12 @@
 package no.oktodrive.app
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.Intent
+import android.net.Uri
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -21,6 +27,74 @@ import android.widget.Toast
  * Never display a fake connected state or claim that PTT transmits audio.
  */
 class MainActivity : Activity() {
+
+    private val releaseApi = "https://api.github.com/repos/Oktopustrh/OktoDrive/releases/latest"
+
+    private fun checkForUpdates(manual: Boolean) {
+        Thread {
+            try {
+                val connection = (URL(releaseApi).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 8000
+                    readTimeout = 8000
+                    setRequestProperty("Accept", "application/vnd.github+json")
+                    setRequestProperty("User-Agent", "OktoDrive-Android")
+                }
+                try {
+                    val code = connection.responseCode
+                    if (code == 404) {
+                        if (manual) runOnUiThread {
+                            AlertDialog.Builder(this).setMessage("Ingen publisert OktoDrive-versjon ennå. Utviklingsbygg ligger foreløpig på GitHub Actions.")
+                                .setPositiveButton("OK", null).show()
+                        }
+                        return@Thread
+                    }
+                    if (code != 200) throw IllegalStateException("GitHub svarte HTTP $code")
+                    val release = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+                    val assets = release.optJSONArray("assets")
+                    var apkUrl: String? = null
+                    if (assets != null) for (i in 0 until assets.length()) {
+                        val asset = assets.getJSONObject(i)
+                        if (asset.optString("name").endsWith(".apk", ignoreCase = true)) {
+                            apkUrl = asset.optString("browser_download_url")
+                            break
+                        }
+                    }
+                    val tag = release.optString("tag_name")
+                    val version = tag.removePrefix("v").split(".")
+                    val publishedCode = version.getOrNull(0)?.toIntOrNull()?.let { major ->
+                        val minor = version.getOrNull(1)?.toIntOrNull() ?: 0
+                        val patch = version.getOrNull(2)?.toIntOrNull() ?: 0
+                        major * 1000000 + minor * 1000 + patch
+                    }
+                    val installed = packageManager.getPackageInfo(packageName, 0)
+                    @Suppress("DEPRECATION")
+                    val currentCode = installed.longVersionCode
+                    val downloadUrl = apkUrl
+                    if (downloadUrl != null && publishedCode != null && publishedCode > currentCode) {
+                        runOnUiThread {
+                            AlertDialog.Builder(this)
+                                .setTitle("Ny OktoDrive-versjon: $tag")
+                                .setMessage("Vil du laste ned oppdateringen? Android ber deg bekrefte installasjonen.")
+                                .setNegativeButton("Senere", null)
+                                .setPositiveButton("Last ned") { _, _ ->
+                                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(downloadUrl)))
+                                }.show()
+                        }
+                    } else if (manual) {
+                        runOnUiThread {
+                            AlertDialog.Builder(this).setMessage("Ingen nyere publisert APK er tilgjengelig akkurat nå.")
+                                .setPositiveButton("OK", null).show()
+                        }
+                    }
+                } finally { connection.disconnect() }
+            } catch (e: Exception) {
+                if (manual) runOnUiThread {
+                    AlertDialog.Builder(this).setMessage("Kunne ikke sjekke oppdateringer: ${e.localizedMessage}")
+                        .setPositiveButton("OK", null).show()
+                }
+            }
+        }.start()
+    }
 
     private val navy = Color.rgb(10, 49, 105)
     private val blue = Color.rgb(25, 118, 210)
@@ -95,6 +169,7 @@ class MainActivity : Activity() {
         }
         val scroll = ScrollView(this).apply { addView(root) }
         setContentView(scroll)
+        checkForUpdates(manual = false)
 
         // Header / branding
         val header = LinearLayout(this).apply {
@@ -125,11 +200,7 @@ class MainActivity : Activity() {
                     menu.add("Om OktoDrive")
                     setOnMenuItemClickListener { item ->
                         when (item.title.toString()) {
-                            "Se etter oppdatering" -> Toast.makeText(
-                                this@MainActivity,
-                                "Oppdateringssjekk kommer i neste trinn.",
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            "Se etter oppdatering" -> checkForUpdates(manual = true)
                             "Om OktoDrive" -> Toast.makeText(
                                 this@MainActivity,
                                 "OktoDrive – tidlig utviklerversjon",
