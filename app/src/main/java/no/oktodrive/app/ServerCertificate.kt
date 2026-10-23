@@ -70,4 +70,36 @@ internal object ServerCertificate {
         }
         handshake(host, port, manager)
     }
+
+    /**
+     * Opens a TLS socket and checks the previously approved SHA-256 fingerprint
+     * before allowing any Mumble protocol messages to be transmitted.
+     */
+    fun openPinned(host: String, port: Int, expectedFingerprint: String): SSLSocket {
+        val manager = object : X509TrustManager {
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+            override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
+                throw CertificateException("Client certificates are not supported")
+            }
+            override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+                if (chain.isEmpty()) throw CertificateException("Server sent no certificate")
+                chain.first().checkValidity()
+                if (fingerprint(chain.first()) != expectedFingerprint) {
+                    throw CertificateException("Server certificate has changed (fingerprint mismatch)")
+                }
+            }
+        }
+        val context = SSLContext.getInstance("TLS")
+        context.init(null, arrayOf<javax.net.ssl.TrustManager>(manager), null)
+        val socket = context.socketFactory.createSocket() as SSLSocket
+        try {
+            socket.soTimeout = 12000
+            socket.connect(InetSocketAddress(host, port), 6000)
+            socket.startHandshake()
+            return socket
+        } catch (e: Exception) {
+            socket.close()
+            throw e
+        }
+    }
 }
