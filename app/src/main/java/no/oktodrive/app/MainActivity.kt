@@ -34,35 +34,65 @@ class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("server_settings", MODE_PRIVATE) }
 
     /**
-     * Tests TLS reachability only. This is NOT a Mumble login/session.
-     * Keep PTT disabled until the actual Mumble protocol and audio are implemented.
+     * TLS test only; this is not yet a Mumble session.
+     * First contact requires explicit certificate fingerprint approval.
      */
     private fun testServer(host: String, port: Int, status: TextView, button: Button) {
         status.text = "●  Tester server …"
         status.setTextColor(muted)
         button.isEnabled = false
+        val pinKey = "cert_sha256_${host.lowercase()}:$port"
+        val knownPin = prefs.getString(pinKey, null)
         Thread {
-            val result = try {
-                val socket = SSLSocketFactory.getDefault().createSocket() as SSLSocket
-                socket.use {
-                    it.soTimeout = 6000
-                    it.connect(java.net.InetSocketAddress(host, port), 6000)
-                    it.startHandshake()
+            try {
+                val certificate = ServerCertificate.discover(host, port)
+                val fingerprint = ServerCertificate.fingerprint(certificate)
+                if (knownPin != null) {
+                    if (knownPin != fingerprint) {
+                        runOnUiThread {
+                            finishServerTest(status, button)
+                            AlertDialog.Builder(this)
+                                .setTitle("ADVARSEL: Serversertifikatet er endret")
+                                .setMessage("Tilkoblingen er blokkert. Serveren $host:$port viser nå et annet sertifikat. Kontroller endringen med serveradministrator før du eventuelt glemmer det lagrede sertifikatet i menyen.\n\nNytt SHA-256:\n$fingerprint")
+                                .setPositiveButton("OK", null).show()
+                        }
+                        return@Thread
+                    }
+                    ServerCertificate.verifyPinned(host, port, knownPin)
+                    runOnUiThread {
+                        finishServerTest(status, button)
+                        AlertDialog.Builder(this).setTitle("Sikker TLS-forbindelse bekreftet")
+                            .setMessage("Serversertifikatet samsvarer med lagret SHA-256.\n\nMumble-innlogging og lyd er ikke implementert ennå.")
+                            .setPositiveButton("OK", null).show()
+                    }
+                } else {
+                    runOnUiThread {
+                        finishServerTest(status, button)
+                        AlertDialog.Builder(this)
+                            .setTitle("Nytt serversertifikat")
+                            .setMessage("Server: $host:$port\n\nUtsteder: ${certificate.issuerX500Principal.name}\n\nSHA-256:\n$fingerprint\n\nSammenlign fingeravtrykket med serverens sertifikat via en uavhengig, pålitelig kanal før du godkjenner. Dette er ikke en Mumble-innlogging.")
+                            .setNegativeButton("Avbryt", null)
+                            .setPositiveButton("Jeg har kontrollert – godkjenn") { _, _ ->
+                                prefs.edit().putString(pinKey, fingerprint).apply()
+                                testServer(host, port, status, button)
+                            }.show()
+                    }
                 }
-                "TLS-kontakt OK. Mumble-innlogging er ennå ikke implementert."
             } catch (e: Exception) {
-                "Kunne ikke nå serveren: ${e.localizedMessage ?: e.javaClass.simpleName}"
-            }
-            runOnUiThread {
-                status.text = "●  Ikke tilkoblet"
-                status.setTextColor(Color.rgb(190, 55, 45))
-                button.isEnabled = true
-                AlertDialog.Builder(this)
-                    .setTitle("Servertest")
-                    .setMessage(result)
-                    .setPositiveButton("OK", null).show()
+                runOnUiThread {
+                    finishServerTest(status, button)
+                    AlertDialog.Builder(this).setTitle("Servertest")
+                        .setMessage("Kunne ikke opprette sikker TLS-forbindelse: ${e.localizedMessage ?: e.javaClass.simpleName}")
+                        .setPositiveButton("OK", null).show()
+                }
             }
         }.start()
+    }
+
+    private fun finishServerTest(status: TextView, button: Button) {
+        status.text = "●  Ikke tilkoblet"
+        status.setTextColor(Color.rgb(190, 55, 45))
+        button.isEnabled = true
     }
 
     private val releaseApi = "https://api.github.com/repos/Oktopustrh/OktoDrive/releases/latest"
@@ -244,10 +274,23 @@ class MainActivity : Activity() {
             setOnClickListener { anchor ->
                 PopupMenu(this@MainActivity, anchor).apply {
                     menu.add("Se etter oppdatering")
+                    menu.add("Glem lagret serversertifikat")
                     menu.add("Om OktoDrive")
                     setOnMenuItemClickListener { item ->
                         when (item.title.toString()) {
                             "Se etter oppdatering" -> checkForUpdates(manual = true)
+                            "Glem lagret serversertifikat" -> {
+                                val host = prefs.getString("host", "") ?: ""
+                                val port = prefs.getString("port", "64738") ?: "64738"
+                                val pinKey = "cert_sha256_${host.lowercase()}:$port"
+                                AlertDialog.Builder(this@MainActivity)
+                                    .setTitle("Glem serversertifikat?")
+                                    .setMessage("Dette fjerner den lagrede sikkerhetskontrollen for $host:$port. Gjør det bare hvis serveradministrator har bekreftet sertifikatendringen.")
+                                    .setNegativeButton("Avbryt", null)
+                                    .setPositiveButton("Glem") { _, _ ->
+                                        prefs.edit().remove(pinKey).apply()
+                                    }.show()
+                            }
                             "Om OktoDrive" -> Toast.makeText(
                                 this@MainActivity,
                                 "OktoDrive – tidlig utviklerversjon",
