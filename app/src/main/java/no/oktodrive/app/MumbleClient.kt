@@ -72,7 +72,7 @@ internal class MumbleClient(
                         input.readFully(payload)
                         when (type) {
                             4 -> {
-                                val reason = fields(payload)[4]?.lastOrNull()?.asText()
+                                val reason = fields(payload)[2]?.lastOrNull()?.asText()
                                     ?: "Serveren avviste innloggingen"
                                 throw IOException(reason)
                             }
