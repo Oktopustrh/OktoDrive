@@ -68,7 +68,7 @@ class MainActivity : Activity() {
                     }
                     val installed = packageManager.getPackageInfo(packageName, 0)
                     @Suppress("DEPRECATION")
-                    val currentCode = installed.longVersionCode
+                    val currentCode = if (android.os.Build.VERSION.SDK_INT >= 28) installed.longVersionCode else installed.versionCode.toLong()
                     val downloadUrl = apkUrl
                     if (downloadUrl != null && publishedCode != null && publishedCode > currentCode) {
                         runOnUiThread {
