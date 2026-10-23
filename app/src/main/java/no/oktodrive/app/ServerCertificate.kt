@@ -30,7 +30,7 @@ internal object ServerCertificate {
         trustManager: X509TrustManager
     ): X509Certificate {
         val context = SSLContext.getInstance("TLS")
-        context.init(null, arrayOf(trustManager), null)
+        context.init(null, arrayOf<javax.net.ssl.TrustManager>(trustManager), null)
         val socket = context.socketFactory.createSocket() as SSLSocket
         socket.use {
             it.soTimeout = 6000
