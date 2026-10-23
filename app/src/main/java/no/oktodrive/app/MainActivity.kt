@@ -163,6 +163,52 @@ class MainActivity : Activity() {
         }.start()
     }
 
+
+    private var mumble: MumbleClient? = null
+    private lateinit var channelList: TextView
+    private lateinit var connectButton: Button
+    private var mumbleConnected = false
+
+    override fun onDestroy() {
+        mumble?.disconnect()
+        super.onDestroy()
+    }
+
+    private fun startMumble(host: String, port: Int, name: String, password: String) {
+        val pin = prefs.getString("cert_sha256_${host.lowercase()}:$port", null)
+        if (pin == null) {
+            AlertDialog.Builder(this).setTitle("Sertifikat må godkjennes")
+                .setMessage("Trykk TEST SERVERFORBINDELSE først, kontroller fingeravtrykket og godkjenn serversertifikatet.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        connectButton.isEnabled = false
+        mumble = MumbleClient(host, port, name, password, pin, object : MumbleClient.Listener {
+            override fun onStatus(message: String, connected: Boolean) {
+                runOnUiThread {
+                    mumbleConnected = connected
+                    connectionStatus.text = "●  $message"
+                    connectionStatus.setTextColor(if (connected) Color.rgb(25, 130, 65) else Color.rgb(190, 55, 45))
+                    connectButton.text = if (connected) "KOBLE FRA" else "KOBLE TIL MUMBLE"
+                    connectButton.isEnabled = true
+                }
+            }
+            override fun onChannels(channels: List<MumbleClient.Channel>) {
+                runOnUiThread {
+                    channelList.text = if (channels.isEmpty()) "Ingen kanaler mottatt ennå."
+                    else channels.joinToString("\n") { "• ${it.name}" }
+                }
+            }
+            override fun onError(message: String) {
+                runOnUiThread {
+                    AlertDialog.Builder(this@MainActivity).setTitle("Mumble-tilkobling")
+                        .setMessage(message).setPositiveButton("OK", null).show()
+                }
+            }
+        })
+        mumble?.connect()
+    }
+
     private lateinit var connectionStatus: TextView
 
     private val navy = Color.rgb(10, 49, 105)
@@ -320,6 +366,10 @@ class MainActivity : Activity() {
         serverCard.addView(spacer(10))
         val (nameBox, nameInput) = field("Navn", prefs.getString("name", "") ?: "")
         serverCard.addView(nameBox)
+        serverCard.addView(spacer(10))
+        val (passwordBox, passwordInput) = field("Serverpassord (om nødvendig)", hint = "Ikke lagret")
+        passwordInput.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        serverCard.addView(passwordBox)
         serverCard.addView(spacer(12))
 
         val testButton = Button(this).apply {
@@ -344,6 +394,32 @@ class MainActivity : Activity() {
         }
         serverCard.addView(testButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
+        connectButton = Button(this).apply {
+            text = "KOBLE TIL MUMBLE"
+            textSize = 16f
+            minHeight = dp(58)
+            setTextColor(Color.WHITE)
+            background = rounded(navy, 12)
+        }
+        connectButton.setOnClickListener {
+            if (mumbleConnected) {
+                mumble?.disconnect()
+            } else {
+                val host = addressInput.text.toString().trim()
+                val port = portInput.text.toString().toIntOrNull()
+                val name = nameInput.text.toString().trim()
+                if (host.isBlank() || port == null || port !in 1..65535 || name.isBlank()) {
+                    AlertDialog.Builder(this).setMessage("Fyll inn serveradresse, port og brukernavn.")
+                        .setPositiveButton("OK", null).show()
+                } else {
+                    prefs.edit().putString("host", host).putString("port", port.toString())
+                        .putString("name", name).apply()
+                    startMumble(host, port, name, passwordInput.text.toString())
+                }
+            }
+        }
+        serverCard.addView(spacer(10))
+        serverCard.addView(connectButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         root.addView(serverCard)
         root.addView(spacer(14))
 
@@ -351,7 +427,8 @@ class MainActivity : Activity() {
         val channelCard = card()
         channelCard.addView(text("👥  Kanaler", 22f, navy, true))
         channelCard.addView(spacer(10))
-        channelCard.addView(text("Kanallisten vises etter at Mumble-tilkoblingen er implementert.", 15f, muted))
+        channelList = text("Kanallisten vises når Mumble-serveren er tilkoblet.", 15f, muted)
+        channelCard.addView(channelList)
         channelCard.addView(spacer(14))
         channelCard.addView(text("👥  Aktiv talegruppe:   Ingen", 16f, navy, true))
         channelCard.addView(spacer(10))
