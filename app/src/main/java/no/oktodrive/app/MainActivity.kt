@@ -18,6 +18,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.ScrollView
@@ -219,7 +220,13 @@ class MainActivity : Activity() {
             background = rounded(paleBlue, 18)
         }
 
-        header.addView(text("🐙📻", 34f), LinearLayout.LayoutParams(dp(72), ViewGroup.LayoutParams.WRAP_CONTENT))
+        val mascot = ImageView(this).apply {
+            setImageResource(R.drawable.oktodrive_driver_mascot)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            contentDescription = "OktoDrive-maskot i lastebil med radio"
+            setPadding(0, 0, dp(8), 0)
+        }
+        header.addView(mascot, LinearLayout.LayoutParams(dp(104), dp(72)))
 
         val titleBlock = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
