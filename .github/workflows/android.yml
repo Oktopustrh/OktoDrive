@@ -23,14 +23,15 @@ jobs:
           SDKMANAGER=""
           for CANDIDATE in \
             "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
-            "$SDK_ROOT/cmdline-tools/bin/sdkmanager"; do
+            "$SDK_ROOT/cmdline-tools/bin/sdkmanager" \
+            "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager; do
             if [ -x "$CANDIDATE" ]; then
               SDKMANAGER="$CANDIDATE"
               break
             fi
           done
           if [ -z "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager -perm -u+x | head -n 1)"
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager -perm -u+x 2>/dev/null | head -n 1)"
           fi
           if [ -z "$SDKMANAGER" ]; then
             echo "::error::Android SDK command-line tools not found under $SDK_ROOT"
