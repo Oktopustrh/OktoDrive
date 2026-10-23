@@ -30,7 +30,7 @@ jobs:
             fi
           done
           if [ -z "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager -perm -u+x 2>/dev/null | sort | head -n 1)"
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager -perm -u+x 2>/dev/null | sort -V | tail -n 1)"
           fi
           if [ -z "$SDKMANAGER" ]; then
             echo "::error::Android SDK command-line tools not found under $SDK_ROOT"
