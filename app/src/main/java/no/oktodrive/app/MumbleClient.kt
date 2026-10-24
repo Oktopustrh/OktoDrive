@@ -38,9 +38,20 @@ internal class MumbleClient(
         fun onChannels(channels: List<Channel>)
         fun onActiveChannel(channelId: Int)
         fun onError(message: String)
+        fun onUsers(users: List<User>) {}
     }
 
     data class Channel(val id: Int, val name: String, val parent: Int?)
+
+    data class User(
+        val session: Int,
+        val name: String,
+        val channelId: Int?,
+        val selfMute: Boolean,
+        val selfDeaf: Boolean,
+        val mutedByServer: Boolean,
+        val suppressed: Boolean
+    )
 
     private val desiredConnected = AtomicBoolean(false)
     private val workerRunning = AtomicBoolean(false)
@@ -49,7 +60,7 @@ internal class MumbleClient(
     @Volatile private var ownSession: Int? = null
     @Volatile private var lastRequestedChannelId: Int? = null
     private val channels = sortedMapOf<Int, Channel>()
-    private val userChannels = mutableMapOf<Int, Int>()
+    private val users = mutableMapOf<Int, User>()
 
     fun connect() {
         desiredConnected.set(true)
@@ -143,8 +154,9 @@ internal class MumbleClient(
                                         Log.i(TAG, "ServerSync received; ownSession=$ownSession")
                                         listener.onStatus("Tilkoblet Mumble som $username", true)
                                         listener.onChannels(channels.values.toList())
+                                        listener.onUsers(snapshotUsers())
                                         ownSession?.let { session ->
-                                            userChannels[session]?.let(listener::onActiveChannel)
+                                            users[session]?.channelId?.let(listener::onActiveChannel)
                                         }
                                     }
 
@@ -177,16 +189,53 @@ internal class MumbleClient(
 
                                     TYPE_USER_REMOVE -> {
                                         val removed = UserRemove.parseFrom(payload)
-                                        userChannels.remove(removed.session)
+                                        users.remove(removed.session)
+                                        listener.onUsers(snapshotUsers())
                                     }
 
                                     TYPE_USER_STATE -> {
                                         val state = UserState.parseFrom(payload)
-                                        if (state.hasSession() && state.hasChannelId()) {
+                                        if (state.hasSession()) {
                                             val session = state.session
-                                            val channelId = state.channelId
-                                            userChannels[session] = channelId
-                                            if (session == ownSession) {
+                                            val previous = users[session]
+                                            val updated = User(
+                                                session = session,
+                                                name = if (state.hasName()) {
+                                                    state.name
+                                                } else {
+                                                    previous?.name ?: "Bruker $session"
+                                                },
+                                                channelId = if (state.hasChannelId()) {
+                                                    state.channelId
+                                                } else {
+                                                    previous?.channelId
+                                                },
+                                                selfMute = if (state.hasSelfMute()) {
+                                                    state.selfMute
+                                                } else {
+                                                    previous?.selfMute ?: false
+                                                },
+                                                selfDeaf = if (state.hasSelfDeaf()) {
+                                                    state.selfDeaf
+                                                } else {
+                                                    previous?.selfDeaf ?: false
+                                                },
+                                                mutedByServer = if (state.hasMute()) {
+                                                    state.mute
+                                                } else {
+                                                    previous?.mutedByServer ?: false
+                                                },
+                                                suppressed = if (state.hasSuppress()) {
+                                                    state.suppress
+                                                } else {
+                                                    previous?.suppressed ?: false
+                                                }
+                                            )
+                                            users[session] = updated
+                                            listener.onUsers(snapshotUsers())
+
+                                            if (session == ownSession && state.hasChannelId()) {
+                                                val channelId = state.channelId
                                                 Log.i(
                                                     TAG,
                                                     "Own UserState confirmed channel=$channelId " +
@@ -243,7 +292,6 @@ internal class MumbleClient(
                                     }
 
                                     else -> {
-                                        // Other Mumble message types are intentionally ignored for now.
                                         Log.v(TAG, "Ignoring Mumble control message type=$type bytes=$length")
                                     }
                                 }
@@ -273,6 +321,7 @@ internal class MumbleClient(
                         }
                     } finally {
                         clearConnectionState()
+                        listener.onUsers(emptyList())
                         if (connectedThisAttempt && desiredConnected.get()) {
                             Log.i(TAG, "Connection attempt ended; reconnect remains enabled")
                         }
@@ -282,6 +331,7 @@ internal class MumbleClient(
                 desiredConnected.set(false)
                 workerRunning.set(false)
                 clearConnectionState()
+                listener.onUsers(emptyList())
                 try {
                     OktoDriveApp.stopConnectionProtection()
                 } catch (e: Exception) {
@@ -326,11 +376,14 @@ internal class MumbleClient(
         try { socket?.close() } catch (_: Exception) {}
     }
 
+    private fun snapshotUsers(): List<User> = users.values
+        .sortedWith(compareBy<User>({ it.channelId ?: Int.MAX_VALUE }, { it.name.lowercase() }))
+
     private fun clearConnectionState() {
         controlOutput = null
         ownSession = null
         lastRequestedChannelId = null
-        userChannels.clear()
+        users.clear()
         try { socket?.close() } catch (_: Exception) {}
         socket = null
     }
