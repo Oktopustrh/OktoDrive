@@ -1,0 +1,152 @@
+// Derived from Mumble's upstream src/Mumble.proto.
+// Copyright (C) The Mumble Developers.
+// Redistribution and use are permitted under Mumble's BSD-style license.
+// See THIRD_PARTY_STRATEGY.md and the upstream Mumble LICENSE.
+
+syntax = "proto2";
+
+package MumbleProto;
+
+option java_package = "no.oktodrive.app.proto";
+option java_multiple_files = true;
+option optimize_for = SPEED;
+
+message Version {
+  optional uint32 version_v1 = 1;
+  optional string release = 2;
+  optional string os = 3;
+  optional string os_version = 4;
+  optional uint64 version_v2 = 5;
+}
+
+message Authenticate {
+  optional string username = 1;
+  optional string password = 2;
+  repeated string tokens = 3;
+  repeated int32 celt_versions = 4;
+  optional bool opus = 5 [default = false];
+  optional int32 client_type = 6 [default = 0];
+}
+
+message Ping {
+  optional uint64 timestamp = 1;
+  optional uint32 good = 2;
+  optional uint32 late = 3;
+  optional uint32 lost = 4;
+  optional uint32 resync = 5;
+  optional uint32 udp_packets = 6;
+  optional uint32 tcp_packets = 7;
+  optional float udp_ping_avg = 8;
+  optional float udp_ping_var = 9;
+  optional float tcp_ping_avg = 10;
+  optional float tcp_ping_var = 11;
+}
+
+message Reject {
+  enum RejectType {
+    None = 0;
+    WrongVersion = 1;
+    InvalidUsername = 2;
+    WrongUserPW = 3;
+    WrongServerPW = 4;
+    UsernameInUse = 5;
+    ServerFull = 6;
+    NoCertificate = 7;
+    AuthenticatorFail = 8;
+    NoNewConnections = 9;
+  }
+  optional RejectType type = 1;
+  optional string reason = 2;
+}
+
+message ServerSync {
+  optional uint32 session = 1;
+  optional uint32 max_bandwidth = 2;
+  optional string welcome_text = 3;
+  optional uint64 permissions = 4;
+}
+
+message ChannelRemove {
+  required uint32 channel_id = 1;
+}
+
+message ChannelState {
+  optional uint32 channel_id = 1;
+  optional uint32 parent = 2;
+  optional string name = 3;
+  repeated uint32 links = 4;
+  optional string description = 5;
+  repeated uint32 links_add = 6;
+  repeated uint32 links_remove = 7;
+  optional bool temporary = 8 [default = false];
+  optional int32 position = 9 [default = 0];
+  optional bytes description_hash = 10;
+  optional uint32 max_users = 11;
+  optional bool is_enter_restricted = 12;
+  optional bool can_enter = 13;
+}
+
+message UserRemove {
+  required uint32 session = 1;
+  optional uint32 actor = 2;
+  optional string reason = 3;
+  optional bool ban = 4;
+  optional bool ban_certificate = 5;
+  optional bool ban_ip = 6;
+}
+
+message UserState {
+  message VolumeAdjustment {
+    optional uint32 listening_channel = 1;
+    optional float volume_adjustment = 2;
+  }
+
+  optional uint32 session = 1;
+  optional uint32 actor = 2;
+  optional string name = 3;
+  optional uint32 user_id = 4;
+  optional uint32 channel_id = 5;
+  optional bool mute = 6;
+  optional bool deaf = 7;
+  optional bool suppress = 8;
+  optional bool self_mute = 9;
+  optional bool self_deaf = 10;
+  optional bytes texture = 11;
+  optional bytes plugin_context = 12;
+  optional string plugin_identity = 13;
+  optional string comment = 14;
+  optional string hash = 15;
+  optional bytes comment_hash = 16;
+  optional bytes texture_hash = 17;
+  optional bool priority_speaker = 18;
+  optional bool recording = 19;
+  repeated string temporary_access_tokens = 20;
+  repeated uint32 listening_channel_add = 21;
+  repeated uint32 listening_channel_remove = 22;
+  repeated VolumeAdjustment listening_volume_adjustment = 23;
+}
+
+message PermissionDenied {
+  enum DenyType {
+    Text = 0;
+    Permission = 1;
+    SuperUser = 2;
+    ChannelName = 3;
+    TextTooLong = 4;
+    H9K = 5;
+    TemporaryChannel = 6;
+    MissingCertificate = 7;
+    UserName = 8;
+    ChannelFull = 9;
+    NestingLimit = 10;
+    ChannelCountLimit = 11;
+    ChannelListenerLimit = 12;
+    UserListenerLimit = 13;
+  }
+  optional uint32 permission = 1;
+  optional uint32 channel_id = 2;
+  optional uint32 session = 3;
+  optional string reason = 4;
+  optional DenyType type = 5;
+  optional string name = 6;
+}
