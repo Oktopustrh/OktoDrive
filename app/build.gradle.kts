@@ -52,6 +52,7 @@ android {
 
 dependencies {
     implementation("com.google.protobuf:protobuf-javalite:3.25.5")
+    testImplementation("junit:junit:4.13.2")
 }
 
 protobuf {
