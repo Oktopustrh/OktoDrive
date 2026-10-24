@@ -50,14 +50,12 @@ jobs:
           fi
           yes | "$SDKMANAGER" --licenses > /dev/null || true
           "$SDKMANAGER" --install 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Run protocol unit tests
-        run: gradle --no-daemon :app:testDebugUnitTest
-      - name: Build development APK
+      - name: Test and build development APK
         env:
           OKTODRIVE_TEST_STORE_PASSWORD: ${{ secrets.OKTODRIVE_STORE_PASSWORD }}
           OKTODRIVE_TEST_KEY_ALIAS: ${{ secrets.OKTODRIVE_KEY_ALIAS }}
           OKTODRIVE_TEST_KEY_PASSWORD: ${{ secrets.OKTODRIVE_KEY_PASSWORD }}
-        run: gradle --no-daemon :app:assembleDebug
+        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
       - name: Upload development APK
         if: success()
         uses: actions/upload-artifact@v7
