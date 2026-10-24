@@ -11,11 +11,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.SSLSocket
 
 /**
- * Minimal Mumble control-protocol client. Audio, UDP, PTT and channel
- * switching are intentionally NOT implemented in this milestone.
+ * Minimal Mumble control-protocol client.
  *
  * Uses the documented Mumble control frame: 2-byte message type,
  * 4-byte payload size, then protobuf payload, all over pinned TLS.
+ * Audio, UDP and PTT are still intentionally not implemented.
  */
 internal class MumbleClient(
     private val host: String,
@@ -28,6 +28,7 @@ internal class MumbleClient(
     interface Listener {
         fun onStatus(message: String, connected: Boolean)
         fun onChannels(channels: List<Channel>)
+        fun onActiveChannel(channelId: Int)
         fun onError(message: String)
     }
 
@@ -35,7 +36,10 @@ internal class MumbleClient(
 
     private val running = AtomicBoolean(false)
     @Volatile private var socket: SSLSocket? = null
+    @Volatile private var controlOutput: DataOutputStream? = null
+    @Volatile private var ownSession: Int? = null
     private val channels = sortedMapOf<Int, Channel>()
+    private val userChannels = mutableMapOf<Int, Int>()
 
     fun connect() {
         if (!running.compareAndSet(false, true)) return
@@ -48,6 +52,7 @@ internal class MumbleClient(
                 tls.soTimeout = 1500
                 val input = DataInputStream(tls.inputStream)
                 val output = DataOutputStream(tls.outputStream)
+                controlOutput = output
                 send(output, 0, proto {
                     number(1, 0x010500)
                     string(2, "OktoDrive 0.1")
@@ -77,9 +82,14 @@ internal class MumbleClient(
                                 throw IOException(reason)
                             }
                             5 -> {
+                                val sync = fields(payload)
+                                ownSession = sync[1]?.firstOrNull()?.asNumber()?.toInt()
                                 wasConnected = true
                                 listener.onStatus("Tilkoblet Mumble som $username", true)
                                 listener.onChannels(channels.values.toList())
+                                ownSession?.let { session ->
+                                    userChannels[session]?.let(listener::onActiveChannel)
+                                }
                             }
                             6 -> {
                                 fields(payload)[1]?.firstOrNull()?.asNumber()?.toInt()?.let { channels.remove(it) }
@@ -96,6 +106,18 @@ internal class MumbleClient(
                                     listener.onChannels(channels.values.toList())
                                 }
                             }
+                            8 -> {
+                                fields(payload)[1]?.firstOrNull()?.asNumber()?.toInt()?.let { userChannels.remove(it) }
+                            }
+                            9 -> {
+                                val f = fields(payload)
+                                val session = f[1]?.firstOrNull()?.asNumber()?.toInt()
+                                val channelId = f[5]?.lastOrNull()?.asNumber()?.toInt()
+                                if (session != null && channelId != null) {
+                                    userChannels[session] = channelId
+                                    if (session == ownSession) listener.onActiveChannel(channelId)
+                                }
+                            }
                         }
                     } catch (_: SocketTimeoutException) {
                         // Timeouts allow periodic ping and clean shutdown.
@@ -105,11 +127,28 @@ internal class MumbleClient(
                 if (running.get()) listener.onError(e.localizedMessage ?: "Ukjent tilkoblingsfeil")
             } finally {
                 running.set(false)
+                controlOutput = null
+                ownSession = null
+                userChannels.clear()
                 try { socket?.close() } catch (_: Exception) {}
                 socket = null
                 listener.onStatus(if (wasConnected) "Frakoblet" else "Ikke tilkoblet", false)
             }
         }, "OktoDrive-Mumble").start()
+    }
+
+    fun switchChannel(channelId: Int): Boolean {
+        val output = controlOutput ?: return false
+        if (!running.get()) return false
+        return try {
+            // UserState field 5 is channel_id. The server applies this to our own session
+            // and confirms the move by broadcasting a UserState message back to us.
+            send(output, 9, proto { number(5, channelId) })
+            true
+        } catch (e: Exception) {
+            listener.onError(e.localizedMessage ?: "Kunne ikke bytte kanal")
+            false
+        }
     }
 
     fun disconnect() {
