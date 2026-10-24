@@ -81,6 +81,11 @@ internal class MumbleClient(
                     var connectedThisAttempt = false
                     try {
                         val reconnecting = reconnectAttempt > 0 || everConnected
+                        channels.clear()
+                        users.clear()
+                        listener.onChannels(emptyList())
+                        listener.onUsers(emptyList())
+
                         Log.i(TAG, "Connecting to $host:$port as '$username' reconnecting=$reconnecting")
                         listener.onStatus(
                             if (reconnecting) "Kobler til Mumble igjen …" else "Kobler til Mumble …",
@@ -136,13 +141,15 @@ internal class MumbleClient(
                                 when (type) {
                                     TYPE_REJECT -> {
                                         val reject = Reject.parseFrom(payload)
+                                        val rejectType = if (reject.hasType()) reject.type.name else "Unknown"
                                         val reason = if (reject.hasReason() && reject.reason.isNotBlank()) {
                                             reject.reason
                                         } else {
-                                            "Serveren avviste innloggingen (${reject.type.name})"
+                                            "Ingen nærmere årsak oppgitt"
                                         }
-                                        Log.w(TAG, "Server rejected login: type=${reject.type} reason=$reason")
-                                        throw FatalConnectionException(reason)
+                                        val message = "Innlogging avvist [$rejectType]: $reason"
+                                        Log.w(TAG, message)
+                                        throw FatalConnectionException(message)
                                     }
 
                                     TYPE_SERVER_SYNC -> {
