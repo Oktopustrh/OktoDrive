@@ -118,6 +118,20 @@ internal class MumbleClient(
                                     if (session == ownSession) listener.onActiveChannel(channelId)
                                 }
                             }
+                            12 -> {
+                                val f = fields(payload)
+                                val reason = f[4]?.lastOrNull()?.asText()?.takeIf { it.isNotBlank() }
+                                val channelId = f[2]?.lastOrNull()?.asNumber()?.toInt()
+                                val channelName = channelId?.let { channels[it]?.name }
+                                listener.onError(
+                                    when {
+                                        reason != null && channelName != null -> "Kan ikke gå inn i $channelName: $reason"
+                                        reason != null -> "Mumble-serveren avviste handlingen: $reason"
+                                        channelName != null -> "Du har ikke tilgang til kanalen $channelName"
+                                        else -> "Mumble-serveren avviste kanalbyttet"
+                                    }
+                                )
+                            }
                         }
                     } catch (_: SocketTimeoutException) {
                         // Timeouts allow periodic ping and clean shutdown.
@@ -139,11 +153,15 @@ internal class MumbleClient(
 
     fun switchChannel(channelId: Int): Boolean {
         val output = controlOutput ?: return false
+        val session = ownSession ?: return false
         if (!running.get()) return false
         return try {
-            // UserState field 5 is channel_id. The server applies this to our own session
-            // and confirms the move by broadcasting a UserState message back to us.
-            send(output, 9, proto { number(5, channelId) })
+            // UserState: field 1 = our session, field 5 = requested channel_id.
+            // The server confirms the move by broadcasting UserState back to us.
+            send(output, 9, proto {
+                number(1, session)
+                number(5, channelId)
+            })
             true
         } catch (e: Exception) {
             listener.onError(e.localizedMessage ?: "Kunne ikke bytte kanal")
