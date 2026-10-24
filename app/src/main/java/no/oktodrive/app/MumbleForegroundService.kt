@@ -78,6 +78,7 @@ class MumbleForegroundService : Service() {
         )
     }
 
+    @Suppress("DEPRECATION")
     private fun buildNotification(): Notification {
         val openApp = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
@@ -87,7 +88,13 @@ class MumbleForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        return Notification.Builder(this, CHANNEL_ID)
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            Notification.Builder(this)
+        }
+
+        return builder
             .setSmallIcon(R.drawable.oktodrive_launcher)
             .setContentTitle("OktoDrive er tilkoblet")
             .setContentText("Holder Mumble-forbindelsen aktiv når skjermen er av")
