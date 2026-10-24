@@ -1,22 +1,29 @@
 package no.oktodrive.app
 
 import android.util.Log
-import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.io.EOFException
 import java.io.IOException
 import java.net.SocketTimeoutException
-import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.SSLSocket
+import no.oktodrive.app.proto.Authenticate
+import no.oktodrive.app.proto.ChannelRemove
+import no.oktodrive.app.proto.ChannelState
+import no.oktodrive.app.proto.PermissionDenied
+import no.oktodrive.app.proto.Ping
+import no.oktodrive.app.proto.Reject
+import no.oktodrive.app.proto.ServerSync
+import no.oktodrive.app.proto.UserRemove
+import no.oktodrive.app.proto.UserState
+import no.oktodrive.app.proto.Version as MumbleVersion
 
 /**
  * Minimal Mumble control-protocol client.
  *
- * Uses the documented Mumble control frame: 2-byte message type,
- * 4-byte payload size, then protobuf payload, all over pinned TLS.
- * Audio, UDP and PTT are still intentionally not implemented.
+ * The control messages are generated from BSD-licensed upstream Mumble
+ * protobuf definitions. Audio, UDP and PTT are still intentionally not
+ * implemented here.
  */
 internal class MumbleClient(
     private val host: String,
@@ -71,44 +78,65 @@ internal class MumbleClient(
 
                         val tls = ServerCertificate.openPinned(host, port, fingerprint)
                         socket = tls
-                        tls.soTimeout = 1500
+                        tls.soTimeout = READ_TIMEOUT_MS
                         val input = DataInputStream(tls.inputStream)
                         val output = DataOutputStream(tls.outputStream)
                         controlOutput = output
 
-                        send(output, 0, proto {
-                            number(1, 0x010500)
-                            string(2, "OktoDrive 0.1")
-                            string(3, "Android")
-                        })
-                        send(output, 2, proto {
-                            string(1, username)
-                            if (password.isNotEmpty()) string(2, password)
-                            number(5, 1) // Opus capability; audio remains disabled.
-                        })
+                        send(
+                            output,
+                            TYPE_VERSION,
+                            MumbleVersion.newBuilder()
+                                .setVersionV1(0x010500)
+                                .setRelease("OktoDrive 0.1")
+                                .setOs("Android")
+                                .build()
+                                .toByteArray()
+                        )
+
+                        val auth = Authenticate.newBuilder()
+                            .setUsername(username)
+                            .setOpus(true)
+                            .apply {
+                                if (password.isNotEmpty()) setPassword(password)
+                            }
+                            .build()
+                        send(output, TYPE_AUTHENTICATE, auth.toByteArray())
 
                         var lastPing = System.currentTimeMillis()
                         while (desiredConnected.get()) {
-                            if (System.currentTimeMillis() - lastPing > 15000) {
-                                send(output, 3, proto { number(1, System.currentTimeMillis()) })
+                            if (System.currentTimeMillis() - lastPing > PING_INTERVAL_MS) {
+                                val ping = Ping.newBuilder()
+                                    .setTimestamp(System.currentTimeMillis())
+                                    .build()
+                                send(output, TYPE_PING, ping.toByteArray())
                                 lastPing = System.currentTimeMillis()
                             }
+
                             try {
                                 val type = input.readUnsignedShort()
                                 val length = input.readInt()
-                                if (length < 0 || length > 2_000_000) throw IOException("Invalid Mumble frame size")
+                                if (length < 0 || length > MAX_CONTROL_FRAME_BYTES) {
+                                    throw IOException("Invalid Mumble frame size: $length")
+                                }
                                 val payload = ByteArray(length)
                                 input.readFully(payload)
+
                                 when (type) {
-                                    4 -> {
-                                        val reason = fields(payload)[2]?.lastOrNull()?.asText()
-                                            ?: "Serveren avviste innloggingen"
-                                        Log.w(TAG, "Server rejected login: $reason")
+                                    TYPE_REJECT -> {
+                                        val reject = Reject.parseFrom(payload)
+                                        val reason = if (reject.hasReason() && reject.reason.isNotBlank()) {
+                                            reject.reason
+                                        } else {
+                                            "Serveren avviste innloggingen (${reject.type.name})"
+                                        }
+                                        Log.w(TAG, "Server rejected login: type=${reject.type} reason=$reason")
                                         throw FatalConnectionException(reason)
                                     }
-                                    5 -> {
-                                        val sync = fields(payload)
-                                        ownSession = sync[1]?.firstOrNull()?.asNumber()?.toInt()
+
+                                    TYPE_SERVER_SYNC -> {
+                                        val sync = ServerSync.parseFrom(payload)
+                                        ownSession = if (sync.hasSession()) sync.session else null
                                         connectedThisAttempt = true
                                         everConnected = true
                                         reconnectAttempt = 0
@@ -119,35 +147,50 @@ internal class MumbleClient(
                                             userChannels[session]?.let(listener::onActiveChannel)
                                         }
                                     }
-                                    6 -> {
-                                        fields(payload)[1]?.firstOrNull()?.asNumber()?.toInt()?.let { channels.remove(it) }
+
+                                    TYPE_CHANNEL_REMOVE -> {
+                                        val removed = ChannelRemove.parseFrom(payload)
+                                        channels.remove(removed.channelId)
                                         listener.onChannels(channels.values.toList())
                                     }
-                                    7 -> {
-                                        val f = fields(payload)
-                                        val id = f[1]?.firstOrNull()?.asNumber()?.toInt()
-                                        if (id != null) {
+
+                                    TYPE_CHANNEL_STATE -> {
+                                        val state = ChannelState.parseFrom(payload)
+                                        if (state.hasChannelId()) {
+                                            val id = state.channelId
                                             val old = channels[id]
-                                            val name = f[3]?.lastOrNull()?.asText() ?: old?.name ?: "Kanal $id"
-                                            val parent = f[2]?.lastOrNull()?.asNumber()?.toInt() ?: old?.parent
+                                            val name = if (state.hasName()) {
+                                                state.name
+                                            } else {
+                                                old?.name ?: "Kanal $id"
+                                            }
+                                            val parent = if (state.hasParent()) state.parent else old?.parent
                                             channels[id] = Channel(id, name, parent)
-                                            Log.d(TAG, "ChannelState id=$id name='$name' parent=$parent")
+                                            Log.d(
+                                                TAG,
+                                                "ChannelState id=$id name='$name' parent=$parent canEnter=" +
+                                                    (if (state.hasCanEnter()) state.canEnter else "unknown")
+                                            )
                                             listener.onChannels(channels.values.toList())
                                         }
                                     }
-                                    8 -> {
-                                        fields(payload)[1]?.firstOrNull()?.asNumber()?.toInt()?.let { userChannels.remove(it) }
+
+                                    TYPE_USER_REMOVE -> {
+                                        val removed = UserRemove.parseFrom(payload)
+                                        userChannels.remove(removed.session)
                                     }
-                                    9 -> {
-                                        val f = fields(payload)
-                                        val session = f[1]?.firstOrNull()?.asNumber()?.toInt()
-                                        val channelId = f[5]?.lastOrNull()?.asNumber()?.toInt()
-                                        if (session != null && channelId != null) {
+
+                                    TYPE_USER_STATE -> {
+                                        val state = UserState.parseFrom(payload)
+                                        if (state.hasSession() && state.hasChannelId()) {
+                                            val session = state.session
+                                            val channelId = state.channelId
                                             userChannels[session] = channelId
                                             if (session == ownSession) {
                                                 Log.i(
                                                     TAG,
-                                                    "Own UserState confirmed channel=$channelId requested=$lastRequestedChannelId"
+                                                    "Own UserState confirmed channel=$channelId " +
+                                                        "requested=$lastRequestedChannelId"
                                                 )
                                                 if (channelId == lastRequestedChannelId) {
                                                     lastRequestedChannelId = null
@@ -156,14 +199,23 @@ internal class MumbleClient(
                                             }
                                         }
                                     }
-                                    12 -> {
-                                        val f = fields(payload)
-                                        val permission = f[1]?.lastOrNull()?.asNumber()
-                                        val channelId = f[2]?.lastOrNull()?.asNumber()?.toInt()
-                                        val deniedSession = f[3]?.lastOrNull()?.asNumber()?.toInt()
-                                        val reason = f[4]?.lastOrNull()?.asText()?.takeIf { it.isNotBlank() }
-                                        val denyType = f[5]?.lastOrNull()?.asNumber()?.toInt()
-                                        val invalidName = f[6]?.lastOrNull()?.asText()?.takeIf { it.isNotBlank() }
+
+                                    TYPE_PERMISSION_DENIED -> {
+                                        val denied = PermissionDenied.parseFrom(payload)
+                                        val permission = if (denied.hasPermission()) denied.permission else null
+                                        val channelId = if (denied.hasChannelId()) denied.channelId else null
+                                        val deniedSession = if (denied.hasSession()) denied.session else null
+                                        val reason = if (denied.hasReason() && denied.reason.isNotBlank()) {
+                                            denied.reason
+                                        } else {
+                                            null
+                                        }
+                                        val denyType = if (denied.hasType()) denied.type.number else null
+                                        val invalidName = if (denied.hasName() && denied.name.isNotBlank()) {
+                                            denied.name
+                                        } else {
+                                            null
+                                        }
                                         val channelName = channelId?.let { channels[it]?.name }
                                         val detail = buildString {
                                             append("type=${denyType ?: "?"}")
@@ -172,7 +224,10 @@ internal class MumbleClient(
                                             append(", permission=${permission ?: "?"}")
                                             if (invalidName != null) append(", name='$invalidName'")
                                         }
-                                        Log.w(TAG, "PermissionDenied $detail reason=${reason ?: "<none>"}")
+                                        Log.w(
+                                            TAG,
+                                            "PermissionDenied $detail reason=${reason ?: "<none>"}"
+                                        )
                                         listener.onError(
                                             when {
                                                 reason != null && channelName != null ->
@@ -186,9 +241,14 @@ internal class MumbleClient(
                                             }
                                         )
                                     }
+
+                                    else -> {
+                                        // Other Mumble message types are intentionally ignored for now.
+                                        Log.v(TAG, "Ignoring Mumble control message type=$type bytes=$length")
+                                    }
                                 }
                             } catch (_: SocketTimeoutException) {
-                                // Timeouts allow periodic ping and clean shutdown.
+                                // Short read timeout lets us send pings and notice explicit disconnects.
                             }
                         }
                     } catch (e: FatalConnectionException) {
@@ -242,13 +302,12 @@ internal class MumbleClient(
         Log.i(TAG, "Queueing UserState channel switch: session=$session channel=$channelId")
         Thread({
             try {
+                val state = UserState.newBuilder()
+                    .setSession(session)
+                    .setChannelId(channelId)
+                    .build()
                 Log.i(TAG, "Sending UserState channel switch: session=$session channel=$channelId")
-                // UserState: field 1 = our session, field 5 = requested channel_id.
-                // The server confirms the move by broadcasting UserState back to us.
-                send(output, 9, proto {
-                    number(1, session)
-                    number(5, channelId)
-                })
+                send(output, TYPE_USER_STATE, state.toByteArray())
             } catch (e: Exception) {
                 lastRequestedChannelId = null
                 Log.e(TAG, "Channel switch write failed", e)
@@ -308,78 +367,23 @@ internal class MumbleClient(
         }
     }
 
-    private fun proto(build: ProtoWriter.() -> Unit): ByteArray =
-        ProtoWriter().apply(build).bytes()
-
     private class FatalConnectionException(message: String) : IOException(message)
-
-    private class ProtoWriter {
-        private val out = ByteArrayOutputStream()
-        fun number(field: Int, value: Long) {
-            varint((field * 8).toLong())
-            varint(value)
-        }
-        fun number(field: Int, value: Int) = number(field, value.toLong())
-        fun string(field: Int, value: String) {
-            val bytes = value.toByteArray(StandardCharsets.UTF_8)
-            varint((field * 8 + 2).toLong())
-            varint(bytes.size.toLong())
-            out.write(bytes)
-        }
-        private fun varint(value: Long) {
-            var v = value
-            while (v and -128L != 0L) {
-                out.write(((v and 127L) or 128L).toInt())
-                v = v ushr 7
-            }
-            out.write(v.toInt())
-        }
-        fun bytes(): ByteArray = out.toByteArray()
-    }
-
-    private data class Value(val data: ByteArray?, val number: Long?) {
-        fun asText(): String = String(data ?: ByteArray(0), StandardCharsets.UTF_8)
-        fun asNumber(): Long = number ?: 0
-    }
-
-    private fun fields(data: ByteArray): Map<Int, List<Value>> {
-        val result = mutableMapOf<Int, MutableList<Value>>()
-        var i = 0
-        fun readVarint(): Long {
-            var value = 0L
-            var shift = 0
-            while (i < data.size && shift < 70) {
-                val b = data[i++].toInt() and 0xff
-                value = value or ((b and 0x7f).toLong() shl shift)
-                if (b and 0x80 == 0) return value
-                shift += 7
-            }
-            throw IOException("Invalid protobuf varint")
-        }
-        while (i < data.size) {
-            val tag = readVarint().toInt()
-            val field = tag ushr 3
-            val wire = tag and 7
-            if (field == 0) throw IOException("Invalid protobuf field")
-            val v = when (wire) {
-                0 -> Value(null, readVarint())
-                1 -> { if (i + 8 > data.size) throw EOFException(); i += 8; continue }
-                2 -> {
-                    val len = readVarint()
-                    if (len < 0 || len > data.size - i) throw IOException("Invalid protobuf length")
-                    val b = data.copyOfRange(i, i + len.toInt())
-                    i += len.toInt()
-                    Value(b, null)
-                }
-                5 -> { if (i + 4 > data.size) throw EOFException(); i += 4; continue }
-                else -> throw IOException("Unsupported protobuf wire type $wire")
-            }
-            result.getOrPut(field) { mutableListOf() }.add(v)
-        }
-        return result
-    }
 
     companion object {
         private const val TAG = "OktoDriveMumble"
+        private const val READ_TIMEOUT_MS = 1500
+        private const val PING_INTERVAL_MS = 15_000L
+        private const val MAX_CONTROL_FRAME_BYTES = 2_000_000
+
+        private const val TYPE_VERSION = 0
+        private const val TYPE_AUTHENTICATE = 2
+        private const val TYPE_PING = 3
+        private const val TYPE_REJECT = 4
+        private const val TYPE_SERVER_SYNC = 5
+        private const val TYPE_CHANNEL_REMOVE = 6
+        private const val TYPE_CHANNEL_STATE = 7
+        private const val TYPE_USER_REMOVE = 8
+        private const val TYPE_USER_STATE = 9
+        private const val TYPE_PERMISSION_DENIED = 12
     }
 }
