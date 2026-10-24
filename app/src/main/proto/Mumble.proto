@@ -19,6 +19,10 @@ message Version {
   optional uint64 version_v2 = 5;
 }
 
+message UDPTunnel {
+  required bytes packet = 1;
+}
+
 message Authenticate {
   optional string username = 1;
   optional string password = 2;
