@@ -16,6 +16,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
@@ -247,7 +248,6 @@ class MainActivity : Activity() {
     private fun spacer(height: Int) = View(this).apply {
         layoutParams = LinearLayout.LayoutParams(1, dp(height))
     }
-
     private fun field(label: String, value: String = "", hint: String = "", focused: Boolean = false): Pair<LinearLayout, EditText> {
         val input = EditText(this).apply {
             setText(value)
@@ -278,6 +278,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
