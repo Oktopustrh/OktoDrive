@@ -36,11 +36,13 @@ class MainActivity : Activity() {
 
     private var mumble: MumbleClient? = null
     private lateinit var channelList: LinearLayout
+    private lateinit var userList: LinearLayout
     private lateinit var activeChannelText: TextView
     private lateinit var connectButton: Button
     private lateinit var connectionStatus: TextView
     private var mumbleConnected = false
     private var channels: List<MumbleClient.Channel> = emptyList()
+    private var users: List<MumbleClient.User> = emptyList()
     private var activeChannelId: Int? = null
 
     private val navy = Color.rgb(10, 49, 105)
@@ -254,6 +256,14 @@ class MainActivity : Activity() {
                     activeChannelId = channelId
                     updateActiveChannelLabel()
                     renderChannels()
+                    renderUsers()
+                }
+            }
+
+            override fun onUsers(users: List<MumbleClient.User>) {
+                runOnUiThread {
+                    this@MainActivity.users = users
+                    renderUsers()
                 }
             }
 
@@ -320,6 +330,26 @@ class MainActivity : Activity() {
                 )
             )
             if (index != channels.lastIndex) channelList.addView(spacer(6))
+        }
+    }
+
+    private fun renderUsers() {
+        if (!::userList.isInitialized) return
+        userList.removeAllViews()
+        val channelUsers = users.filter { it.channelId == activeChannelId }
+        if (channelUsers.isEmpty()) {
+            userList.addView(text("Ingen brukere i aktiv talegruppe.", 14f, muted))
+            return
+        }
+
+        channelUsers.forEachIndexed { index, user ->
+            val state = when {
+                user.selfDeaf -> "  · døvet"
+                user.selfMute || user.mutedByServer || user.suppressed -> "  · dempet"
+                else -> ""
+            }
+            userList.addView(text("•  ${user.name}$state", 15f, navy))
+            if (index != channelUsers.lastIndex) userList.addView(spacer(4))
         }
     }
 
@@ -592,6 +622,14 @@ class MainActivity : Activity() {
         channelCard.addView(spacer(14))
         activeChannelText = text("👥  Aktiv talegruppe:   Ingen", 16f, navy, true)
         channelCard.addView(activeChannelText)
+        channelCard.addView(spacer(10))
+        channelCard.addView(text("Brukere i aktiv talegruppe", 14f, muted, true))
+        channelCard.addView(spacer(6))
+        userList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        channelCard.addView(userList)
+        renderUsers()
         channelCard.addView(spacer(10))
         channelCard.addView(text("◉  Dobbeltvakt:   Ikke aktiv", 16f, navy, true))
         channelCard.addView(spacer(14))
