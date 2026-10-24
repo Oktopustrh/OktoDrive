@@ -6,7 +6,15 @@ OktoDrive should prefer permissively licensed upstream components and public pro
 
 - **Mumble upstream protocol/source** — BSD-style license. The protocol definitions and upstream behavior are suitable references for our own implementation, subject to retaining required notices when code or files are incorporated.
 - **Google Protocol Buffers runtime/compiler** — BSD-3-Clause. Preferred replacement for hand-written protobuf parsing/encoding when we migrate the control protocol to generated message classes.
-- **Opus** — use a permissively licensed, actively maintained Android/JNI binding or package after verifying the exact repository and license before integration.
+- **Opus codec** — the upstream codec uses a permissive BSD-style license.
+
+## Audio candidates to evaluate
+
+These are candidates, not yet dependencies. Pin an exact version/commit and verify transitive/native licensing before adding one.
+
+- **Kopus** — Kotlin Multiplatform Opus wrapper, MIT. Attractive for Kotlin/Android integration, but verify maintenance, ABI packaging and Mumble frame requirements before adoption.
+- **Concentus** — managed Java Opus implementation under the Opus/BSD-style license. Avoids JNI, but benchmark CPU/battery use on the S25 before choosing it for continuous voice.
+- **opus_android** — Android Opus wrapper, Apache-2.0. Older project structure; treat as a fallback/reference unless current Android toolchain compatibility is verified.
 
 ## Reference only — do not copy into OktoDrive
 
