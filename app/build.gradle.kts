@@ -2,7 +2,7 @@ plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
 android {
     namespace = "no.oktodrive.app"
     compileSdk = 35
-    defaultConfig { applicationId = "no.oktodrive.app"; minSdk = 26; targetSdk = 35; versionCode = 1004; versionName = "0.1.4" }
+    defaultConfig { applicationId = "no.oktodrive.app"; minSdk = 26; targetSdk = 35; versionCode = 1005; versionName = "0.1.5" }
     val signingPath = System.getenv("OKTODRIVE_KEYSTORE_PATH")
     if (!signingPath.isNullOrBlank()) {
         signingConfigs {
