@@ -1,5 +1,6 @@
 package no.oktodrive.app
 
+import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -38,6 +39,7 @@ internal class MumbleClient(
     @Volatile private var socket: SSLSocket? = null
     @Volatile private var controlOutput: DataOutputStream? = null
     @Volatile private var ownSession: Int? = null
+    @Volatile private var lastRequestedChannelId: Int? = null
     private val channels = sortedMapOf<Int, Channel>()
     private val userChannels = mutableMapOf<Int, Int>()
 
@@ -46,6 +48,7 @@ internal class MumbleClient(
         Thread({
             var wasConnected = false
             try {
+                Log.i(TAG, "Connecting to $host:$port as '$username'")
                 listener.onStatus("Kobler til Mumble …", false)
                 val tls = ServerCertificate.openPinned(host, port, fingerprint)
                 socket = tls
@@ -79,12 +82,20 @@ internal class MumbleClient(
                             4 -> {
                                 val reason = fields(payload)[2]?.lastOrNull()?.asText()
                                     ?: "Serveren avviste innloggingen"
+                                Log.w(TAG, "Server rejected login: $reason")
                                 throw IOException(reason)
                             }
                             5 -> {
                                 val sync = fields(payload)
                                 ownSession = sync[1]?.firstOrNull()?.asNumber()?.toInt()
                                 wasConnected = true
+                                Log.i(TAG, "ServerSync received; ownSession=$ownSession")
+                                try {
+                                    OktoDriveApp.startConnectionProtection()
+                                    Log.i(TAG, "Foreground connection protection started")
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Could not start foreground protection", e)
+                                }
                                 listener.onStatus("Tilkoblet Mumble som $username", true)
                                 listener.onChannels(channels.values.toList())
                                 ownSession?.let { session ->
@@ -103,6 +114,7 @@ internal class MumbleClient(
                                     val name = f[3]?.lastOrNull()?.asText() ?: old?.name ?: "Kanal $id"
                                     val parent = f[2]?.lastOrNull()?.asNumber()?.toInt() ?: old?.parent
                                     channels[id] = Channel(id, name, parent)
+                                    Log.d(TAG, "ChannelState id=$id name='$name' parent=$parent")
                                     listener.onChannels(channels.values.toList())
                                 }
                             }
@@ -115,20 +127,45 @@ internal class MumbleClient(
                                 val channelId = f[5]?.lastOrNull()?.asNumber()?.toInt()
                                 if (session != null && channelId != null) {
                                     userChannels[session] = channelId
-                                    if (session == ownSession) listener.onActiveChannel(channelId)
+                                    if (session == ownSession) {
+                                        Log.i(
+                                            TAG,
+                                            "Own UserState confirmed channel=$channelId requested=$lastRequestedChannelId"
+                                        )
+                                        if (channelId == lastRequestedChannelId) {
+                                            lastRequestedChannelId = null
+                                        }
+                                        listener.onActiveChannel(channelId)
+                                    }
                                 }
                             }
                             12 -> {
                                 val f = fields(payload)
-                                val reason = f[4]?.lastOrNull()?.asText()?.takeIf { it.isNotBlank() }
+                                val permission = f[1]?.lastOrNull()?.asNumber()
                                 val channelId = f[2]?.lastOrNull()?.asNumber()?.toInt()
+                                val deniedSession = f[3]?.lastOrNull()?.asNumber()?.toInt()
+                                val reason = f[4]?.lastOrNull()?.asText()?.takeIf { it.isNotBlank() }
+                                val denyType = f[5]?.lastOrNull()?.asNumber()?.toInt()
+                                val invalidName = f[6]?.lastOrNull()?.asText()?.takeIf { it.isNotBlank() }
                                 val channelName = channelId?.let { channels[it]?.name }
+                                val detail = buildString {
+                                    append("type=${denyType ?: "?"}")
+                                    append(", channel=${channelId ?: "?"}")
+                                    append(", session=${deniedSession ?: "?"}")
+                                    append(", permission=${permission ?: "?"}")
+                                    if (invalidName != null) append(", name='$invalidName'")
+                                }
+                                Log.w(TAG, "PermissionDenied $detail reason=${reason ?: "<none>"}")
                                 listener.onError(
                                     when {
-                                        reason != null && channelName != null -> "Kan ikke gå inn i $channelName: $reason"
-                                        reason != null -> "Mumble-serveren avviste handlingen: $reason"
-                                        channelName != null -> "Du har ikke tilgang til kanalen $channelName"
-                                        else -> "Mumble-serveren avviste kanalbyttet"
+                                        reason != null && channelName != null ->
+                                            "Kan ikke gå inn i $channelName: $reason\n\nMumble: $detail"
+                                        reason != null ->
+                                            "Mumble-serveren avviste handlingen: $reason\n\nMumble: $detail"
+                                        channelName != null ->
+                                            "Du har ikke tilgang til kanalen $channelName.\n\nMumble: $detail"
+                                        else ->
+                                            "Mumble-serveren avviste kanalbyttet.\n\nMumble: $detail"
                                     }
                                 )
                             }
@@ -138,14 +175,26 @@ internal class MumbleClient(
                     }
                 }
             } catch (e: Exception) {
-                if (running.get()) listener.onError(e.localizedMessage ?: "Ukjent tilkoblingsfeil")
+                Log.e(TAG, "Mumble connection failed: ${e.javaClass.simpleName}: ${e.localizedMessage}", e)
+                if (running.get()) {
+                    listener.onError(
+                        "${e.javaClass.simpleName}: ${e.localizedMessage ?: "Ukjent tilkoblingsfeil"}"
+                    )
+                }
             } finally {
                 running.set(false)
                 controlOutput = null
                 ownSession = null
+                lastRequestedChannelId = null
                 userChannels.clear()
                 try { socket?.close() } catch (_: Exception) {}
                 socket = null
+                try {
+                    OktoDriveApp.stopConnectionProtection()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not stop foreground protection", e)
+                }
+                Log.i(TAG, "Mumble connection closed")
                 listener.onStatus(if (wasConnected) "Frakoblet" else "Ikke tilkoblet", false)
             }
         }, "OktoDrive-Mumble").start()
@@ -156,6 +205,8 @@ internal class MumbleClient(
         val session = ownSession ?: return false
         if (!running.get()) return false
         return try {
+            lastRequestedChannelId = channelId
+            Log.i(TAG, "Sending UserState channel switch: session=$session channel=$channelId")
             // UserState: field 1 = our session, field 5 = requested channel_id.
             // The server confirms the move by broadcasting UserState back to us.
             send(output, 9, proto {
@@ -164,12 +215,18 @@ internal class MumbleClient(
             })
             true
         } catch (e: Exception) {
-            listener.onError(e.localizedMessage ?: "Kunne ikke bytte kanal")
+            lastRequestedChannelId = null
+            Log.e(TAG, "Channel switch write failed", e)
+            listener.onError(
+                "Kanalbytte feilet ved sending: ${e.javaClass.simpleName}: " +
+                    (e.localizedMessage ?: "ukjent feil")
+            )
             false
         }
     }
 
     fun disconnect() {
+        Log.i(TAG, "Disconnect requested")
         running.set(false)
         try { socket?.close() } catch (_: Exception) {}
     }
@@ -250,5 +307,9 @@ internal class MumbleClient(
             result.getOrPut(field) { mutableListOf() }.add(v)
         }
         return result
+    }
+
+    companion object {
+        private const val TAG = "OktoDriveMumble"
     }
 }
