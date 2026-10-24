@@ -204,25 +204,28 @@ internal class MumbleClient(
         val output = controlOutput ?: return false
         val session = ownSession ?: return false
         if (!running.get()) return false
-        return try {
-            lastRequestedChannelId = channelId
-            Log.i(TAG, "Sending UserState channel switch: session=$session channel=$channelId")
-            // UserState: field 1 = our session, field 5 = requested channel_id.
-            // The server confirms the move by broadcasting UserState back to us.
-            send(output, 9, proto {
-                number(1, session)
-                number(5, channelId)
-            })
-            true
-        } catch (e: Exception) {
-            lastRequestedChannelId = null
-            Log.e(TAG, "Channel switch write failed", e)
-            listener.onError(
-                "Kanalbytte feilet ved sending: ${e.javaClass.simpleName}: " +
-                    (e.localizedMessage ?: "ukjent feil")
-            )
-            false
-        }
+
+        lastRequestedChannelId = channelId
+        Log.i(TAG, "Queueing UserState channel switch: session=$session channel=$channelId")
+        Thread({
+            try {
+                Log.i(TAG, "Sending UserState channel switch: session=$session channel=$channelId")
+                // UserState: field 1 = our session, field 5 = requested channel_id.
+                // The server confirms the move by broadcasting UserState back to us.
+                send(output, 9, proto {
+                    number(1, session)
+                    number(5, channelId)
+                })
+            } catch (e: Exception) {
+                lastRequestedChannelId = null
+                Log.e(TAG, "Channel switch write failed", e)
+                listener.onError(
+                    "Kanalbytte feilet ved sending: ${e.javaClass.simpleName}: " +
+                        (e.localizedMessage ?: "ukjent feil")
+                )
+            }
+        }, "OktoDrive-ChannelSwitch").start()
+        return true
     }
 
     fun disconnect() {
