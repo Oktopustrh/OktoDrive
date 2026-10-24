@@ -1,8 +1,13 @@
-plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("com.google.protobuf")
+}
+
 android {
     namespace = "no.oktodrive.app"
     compileSdk = 35
-    defaultConfig { applicationId = "no.oktodrive.app"; minSdk = 26; targetSdk = 35; versionCode = 1006; versionName = "0.1.6" }
+    defaultConfig { applicationId = "no.oktodrive.app"; minSdk = 26; targetSdk = 35; versionCode = 1007; versionName = "0.1.7" }
 
     val releaseSigningPath = System.getenv("OKTODRIVE_KEYSTORE_PATH")
     val testSigningPath = System.getenv("OKTODRIVE_TEST_KEYSTORE_PATH")
@@ -43,4 +48,23 @@ android {
 
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
+}
+
+dependencies {
+    implementation("com.google.protobuf:protobuf-javalite:3.25.5")
+}
+
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:3.25.5"
+    }
+    generateProtoTasks {
+        all().configureEach {
+            builtins {
+                create("java") {
+                    option("lite")
+                }
+            }
+        }
+    }
 }
