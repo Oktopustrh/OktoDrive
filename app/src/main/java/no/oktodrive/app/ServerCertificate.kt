@@ -1,5 +1,8 @@
 package no.oktodrive.app
 
+import java.io.IOException
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.security.MessageDigest
 import java.security.cert.CertificateException
@@ -24,6 +27,43 @@ internal object ServerCertificate {
         MessageDigest.getInstance("SHA-256").digest(cert.encoded)
             .joinToString(":") { "%02X".format(it.toInt() and 0xff) }
 
+    /**
+     * Android may prefer an AAAA record even when the Mumble service only
+     * listens on IPv4. Resolve all addresses explicitly and try IPv4 first,
+     * then fall back to IPv6 if needed.
+     */
+    private fun connectPreferred(
+        context: SSLContext,
+        host: String,
+        port: Int,
+        timeoutMs: Int
+    ): SSLSocket {
+        val addresses = InetAddress.getAllByName(host)
+            .sortedByDescending { it is Inet4Address }
+
+        if (addresses.isEmpty()) {
+            throw IOException("Fant ingen IP-adresse for $host")
+        }
+
+        var lastError: Exception? = null
+        for (address in addresses) {
+            val socket = context.socketFactory.createSocket() as SSLSocket
+            try {
+                socket.soTimeout = timeoutMs
+                socket.connect(InetSocketAddress(address, port), timeoutMs)
+                return socket
+            } catch (e: Exception) {
+                lastError = e
+                try {
+                    socket.close()
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        throw lastError ?: IOException("Kunne ikke koble til $host:$port")
+    }
+
     private fun handshake(
         host: String,
         port: Int,
@@ -31,10 +71,8 @@ internal object ServerCertificate {
     ): X509Certificate {
         val context = SSLContext.getInstance("TLS")
         context.init(null, arrayOf<javax.net.ssl.TrustManager>(trustManager), null)
-        val socket = context.socketFactory.createSocket() as SSLSocket
+        val socket = connectPreferred(context, host, port, 6000)
         socket.use {
-            it.soTimeout = 6000
-            it.connect(InetSocketAddress(host, port), 6000)
             it.startHandshake()
             return it.session.peerCertificates.first() as X509Certificate
         }
@@ -91,10 +129,9 @@ internal object ServerCertificate {
         }
         val context = SSLContext.getInstance("TLS")
         context.init(null, arrayOf<javax.net.ssl.TrustManager>(manager), null)
-        val socket = context.socketFactory.createSocket() as SSLSocket
+        val socket = connectPreferred(context, host, port, 6000)
         try {
             socket.soTimeout = 12000
-            socket.connect(InetSocketAddress(host, port), 6000)
             socket.startHandshake()
             return socket
         } catch (e: Exception) {
