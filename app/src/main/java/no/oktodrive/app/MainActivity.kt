@@ -36,14 +36,15 @@ class MainActivity : Activity() {
 
     private var mumble: MumbleClient? = null
     private lateinit var channelList: LinearLayout
-    private lateinit var userList: LinearLayout
     private lateinit var activeChannelText: TextView
+    private lateinit var muteButton: Button
     private lateinit var connectButton: Button
     private lateinit var connectionStatus: TextView
     private var mumbleConnected = false
     private var channels: List<MumbleClient.Channel> = emptyList()
     private var users: List<MumbleClient.User> = emptyList()
     private var activeChannelId: Int? = null
+    private var radioUiState = RadioUiState()
 
     private val navy = Color.rgb(10, 49, 105)
     private val blue = Color.rgb(25, 118, 210)
@@ -256,14 +257,13 @@ class MainActivity : Activity() {
                     activeChannelId = channelId
                     updateActiveChannelLabel()
                     renderChannels()
-                    renderUsers()
                 }
             }
 
             override fun onUsers(users: List<MumbleClient.User>) {
                 runOnUiThread {
                     this@MainActivity.users = users
-                    renderUsers()
+                    renderChannels()
                 }
             }
 
@@ -329,27 +329,33 @@ class MainActivity : Activity() {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 )
             )
-            if (index != channels.lastIndex) channelList.addView(spacer(6))
-        }
-    }
 
-    private fun renderUsers() {
-        if (!::userList.isInitialized) return
-        userList.removeAllViews()
-        val channelUsers = users.filter { it.channelId == activeChannelId }
-        if (channelUsers.isEmpty()) {
-            userList.addView(text("Ingen brukere i aktiv talegruppe.", 14f, muted))
-            return
-        }
-
-        channelUsers.forEachIndexed { index, user ->
-            val state = when {
-                user.selfDeaf -> "  · døvet"
-                user.selfMute || user.mutedByServer || user.suppressed -> "  · dempet"
-                else -> ""
+            if (isActive) {
+                val activeUsers = users.filter { it.channelId == channel.id }
+                val usersBox = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(18), dp(8), dp(12), dp(10))
+                    background = rounded(Color.rgb(248, 252, 255), 10, border)
+                    addView(text("Brukere i ${channel.name}", 13f, muted, true))
+                    addView(spacer(4))
+                    if (activeUsers.isEmpty()) {
+                        addView(text("Ingen andre brukere i kanalen.", 14f, muted))
+                    } else {
+                        activeUsers.forEachIndexed { userIndex, user ->
+                            val state = when {
+                                user.selfDeaf -> "  · døvet"
+                                user.selfMute || user.mutedByServer || user.suppressed -> "  · dempet"
+                                else -> ""
+                            }
+                            addView(text("•  ${user.name}$state", 15f, navy))
+                            if (userIndex != activeUsers.lastIndex) addView(spacer(3))
+                        }
+                    }
+                }
+                channelList.addView(usersBox)
             }
-            userList.addView(text("•  ${user.name}$state", 15f, navy))
-            if (index != channelUsers.lastIndex) userList.addView(spacer(4))
+
+            if (index != channels.lastIndex) channelList.addView(spacer(6))
         }
     }
 
@@ -409,6 +415,27 @@ class MainActivity : Activity() {
         return layout to input
     }
 
+    private fun setUiMode(mode: UiMode) {
+        radioUiState = radioUiState.copy(mode = mode)
+        prefs.edit().putString("ui_mode", mode.name).apply()
+        Toast.makeText(
+            this,
+            "Grensesnitt satt til ${when (mode) { UiMode.AUTO -> "Automatisk"; UiMode.MOBILE -> "Mobil"; UiMode.RADIO -> "Radio" }}",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun toggleSpeakerMute() {
+        radioUiState = radioUiState.copy(speakerMuted = !radioUiState.speakerMuted)
+        updateMuteButton()
+    }
+
+    private fun updateMuteButton() {
+        if (!::muteButton.isInitialized) return
+        muteButton.text = if (radioUiState.speakerMuted) "🔇  LYD AV – TRYKK FOR LYD" else "🔊  MUTE HØYTTALER"
+        muteButton.setTextColor(if (radioUiState.speakerMuted) Color.rgb(190, 55, 45) else navy)
+    }
+
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(20), dp(18), dp(20), dp(18))
@@ -426,6 +453,11 @@ class MainActivity : Activity() {
         }
         val scroll = ScrollView(this).apply { addView(root) }
         setContentView(scroll)
+        radioUiState = radioUiState.copy(
+            mode = runCatching {
+                UiMode.valueOf(prefs.getString("ui_mode", UiMode.AUTO.name) ?: UiMode.AUTO.name)
+            }.getOrDefault(UiMode.AUTO)
+        )
         checkForUpdates(manual = false)
 
         val header = LinearLayout(this).apply {
@@ -466,11 +498,17 @@ class MainActivity : Activity() {
             setOnClickListener { anchor ->
                 PopupMenu(this@MainActivity, anchor).apply {
                     menu.add("Se etter oppdatering")
+                    menu.add("Grensesnitt: Automatisk")
+                    menu.add("Grensesnitt: Mobil")
+                    menu.add("Grensesnitt: Radio")
                     menu.add("Glem lagret serversertifikat")
                     menu.add("Om OktoDrive")
                     setOnMenuItemClickListener { item ->
                         when (item.title.toString()) {
                             "Se etter oppdatering" -> checkForUpdates(manual = true)
+                            "Grensesnitt: Automatisk" -> setUiMode(UiMode.AUTO)
+                            "Grensesnitt: Mobil" -> setUiMode(UiMode.MOBILE)
+                            "Grensesnitt: Radio" -> setUiMode(UiMode.RADIO)
                             "Glem lagret serversertifikat" -> {
                                 val host = prefs.getString("host", "") ?: ""
                                 val port = prefs.getString("port", "64738") ?: "64738"
@@ -623,16 +661,25 @@ class MainActivity : Activity() {
         activeChannelText = text("👥  Aktiv talegruppe:   Ingen", 16f, navy, true)
         channelCard.addView(activeChannelText)
         channelCard.addView(spacer(10))
-        channelCard.addView(text("Brukere i aktiv talegruppe", 14f, muted, true))
-        channelCard.addView(spacer(6))
-        userList = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        channelCard.addView(userList)
-        renderUsers()
-        channelCard.addView(spacer(10))
         channelCard.addView(text("◉  Dobbeltvakt:   Ikke aktiv", 16f, navy, true))
-        channelCard.addView(spacer(14))
+        channelCard.addView(spacer(12))
+
+        muteButton = Button(this).apply {
+            textSize = 16f
+            minHeight = dp(58)
+            isAllCaps = false
+            background = rounded(Color.WHITE, 12, border)
+            setOnClickListener { toggleSpeakerMute() }
+        }
+        channelCard.addView(
+            muteButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        updateMuteButton()
+        channelCard.addView(spacer(10))
 
         channelCard.addView(
             Button(this).apply {
