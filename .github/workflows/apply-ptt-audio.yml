@@ -1,0 +1,347 @@
+name: Apply PTT audio path
+
+on:
+  push:
+    branches: [ feature/opus-audio-prep ]
+    paths:
+      - '.github/workflows/apply-ptt-audio.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'Add one-shot workflow for real PTT audio path'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/opus-audio-prep
+      - name: Patch Mumble transport and PTT UI
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          # --- MumbleClient: raw TCP tunnel + protocol-aware audio framing ---
+          p = Path('app/src/main/java/no/oktodrive/app/MumbleClient.kt')
+          s = p.read_text()
+          s = s.replace(
+              'import android.util.Log\nimport java.io.DataInputStream',
+              'import android.util.Log\nimport com.google.protobuf.ByteString\nimport java.io.ByteArrayOutputStream\nimport java.io.DataInputStream'
+          )
+          s = s.replace(
+              'import no.oktodrive.app.proto.Version as MumbleVersion',
+              'import no.oktodrive.app.proto.Version as MumbleVersion\nimport no.oktodrive.app.proto.udp.Audio as UdpAudio'
+          )
+          s = s.replace(
+              '@Volatile private var ownSession: Int? = null\n    @Volatile private var lastRequestedChannelId: Int? = null',
+              '@Volatile private var ownSession: Int? = null\n    @Volatile private var serverVersionV1: Int? = null\n    @Volatile private var lastRequestedChannelId: Int? = null'
+          )
+          marker = '''                                when (type) {
+                                    TYPE_REJECT -> {'''
+          replacement = '''                                when (type) {
+                                    TYPE_VERSION -> {
+                                        val version = MumbleVersion.parseFrom(payload)
+                                        serverVersionV1 = if (version.hasVersionV1()) version.versionV1 else null
+                                        Log.i(TAG, "Server version_v1=${serverVersionV1?.let { String.format("0x%06x", it) } ?: "unknown"}")
+                                    }
+
+                                    TYPE_UDP_TUNNEL -> {
+                                        // Raw UDP payload tunneled over TLS/TCP. Incoming playback is the next audio milestone.
+                                        Log.v(TAG, "Incoming tunneled UDP packet bytes=$length")
+                                    }
+
+                                    TYPE_REJECT -> {'''
+          if marker not in s:
+              raise SystemExit('Mumble when marker not found')
+          s = s.replace(marker, replacement, 1)
+
+          switch_marker = '''    fun switchChannel(channelId: Int): Boolean {'''
+          audio_methods = '''    fun sendVoiceFrame(opusData: ByteArray, frameNumber: Long, terminator: Boolean): Boolean {
+        val output = controlOutput ?: return false
+        if (!desiredConnected.get() || ownSession == null) return false
+        return try {
+            val packet = buildVoicePacket(opusData, frameNumber, terminator)
+            send(output, TYPE_UDP_TUNNEL, packet)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Voice tunnel write failed", e)
+            false
+        }
+    }
+
+    private fun buildVoicePacket(opusData: ByteArray, frameNumber: Long, terminator: Boolean): ByteArray {
+        val useProtobufUdp = (serverVersionV1 ?: 0) >= PROTOBUF_UDP_VERSION
+        return if (useProtobufUdp) {
+            val audio = UdpAudio.newBuilder()
+                .setTarget(0)
+                .setFrameNumber(frameNumber)
+                .setOpusData(ByteString.copyFrom(opusData))
+                .setIsTerminator(terminator)
+                .build()
+                .toByteArray()
+            ByteArray(audio.size + 1).also { packet ->
+                packet[0] = UDP_TYPE_AUDIO.toByte()
+                audio.copyInto(packet, destinationOffset = 1)
+            }
+        } else {
+            val out = ByteArrayOutputStream(opusData.size + 16)
+            out.write(LEGACY_OPUS_HEADER)
+            writeMumbleVarInt(out, frameNumber)
+            val lengthField = opusData.size.toLong() or if (terminator) LEGACY_TERMINATOR_BIT else 0L
+            writeMumbleVarInt(out, lengthField)
+            out.write(opusData)
+            out.toByteArray()
+        }
+    }
+
+    private fun writeMumbleVarInt(out: ByteArrayOutputStream, value: Long) {
+        require(value >= 0) { "Only non-negative Mumble varints are used for voice packets" }
+        when {
+            value < 0x80L -> out.write(value.toInt())
+            value < 0x4000L -> {
+                out.write(((value shr 8) or 0x80L).toInt())
+                out.write((value and 0xffL).toInt())
+            }
+            value < 0x200000L -> {
+                out.write(((value shr 16) or 0xc0L).toInt())
+                out.write(((value shr 8) and 0xffL).toInt())
+                out.write((value and 0xffL).toInt())
+            }
+            value < 0x10000000L -> {
+                out.write(((value shr 24) or 0xe0L).toInt())
+                out.write(((value shr 16) and 0xffL).toInt())
+                out.write(((value shr 8) and 0xffL).toInt())
+                out.write((value and 0xffL).toInt())
+            }
+            value < 0x1_0000_0000L -> {
+                out.write(0xf0)
+                out.write(((value shr 24) and 0xffL).toInt())
+                out.write(((value shr 16) and 0xffL).toInt())
+                out.write(((value shr 8) and 0xffL).toInt())
+                out.write((value and 0xffL).toInt())
+            }
+            else -> {
+                out.write(0xf4)
+                for (shift in 56 downTo 0 step 8) out.write(((value shr shift) and 0xffL).toInt())
+            }
+        }
+    }
+
+'''
+          if switch_marker not in s:
+              raise SystemExit('switchChannel marker not found')
+          s = s.replace(switch_marker, audio_methods + switch_marker, 1)
+          s = s.replace(
+              '        ownSession = null\n        lastRequestedChannelId = null',
+              '        ownSession = null\n        serverVersionV1 = null\n        lastRequestedChannelId = null'
+          )
+          s = s.replace(
+              '        private const val TYPE_VERSION = 0\n        private const val TYPE_AUTHENTICATE = 2',
+              '        private const val TYPE_VERSION = 0\n        private const val TYPE_UDP_TUNNEL = 1\n        private const val TYPE_AUTHENTICATE = 2'
+          )
+          s = s.replace(
+              '        private const val TYPE_PERMISSION_DENIED = 12\n',
+              '        private const val TYPE_PERMISSION_DENIED = 12\n\n        private const val PROTOBUF_UDP_VERSION = 0x010500\n        private const val UDP_TYPE_AUDIO = 0\n        private const val LEGACY_OPUS_HEADER = 4 shl 5\n        private const val LEGACY_TERMINATOR_BIT = 1L shl 13\n'
+          )
+          p.write_text(s)
+
+          # --- MainActivity: runtime mic permission + hold-to-talk button ---
+          p = Path('app/src/main/java/no/oktodrive/app/MainActivity.kt')
+          s = p.read_text()
+          s = s.replace(
+              'import android.app.Activity\nimport android.app.AlertDialog',
+              'import android.Manifest\nimport android.app.Activity\nimport android.app.AlertDialog'
+          )
+          s = s.replace(
+              'import android.content.Intent\nimport android.graphics.Color',
+              'import android.content.Intent\nimport android.content.pm.PackageManager\nimport android.graphics.Color'
+          )
+          s = s.replace(
+              'import android.view.Gravity\nimport android.view.View',
+              'import android.view.Gravity\nimport android.view.MotionEvent\nimport android.view.View'
+          )
+          s = s.replace(
+              '    private lateinit var muteButton: Button\n    private lateinit var connectButton: Button',
+              '    private lateinit var muteButton: Button\n    private lateinit var pttButton: Button\n    private lateinit var connectButton: Button'
+          )
+          s = s.replace(
+              '    private var radioUiState = RadioUiState()\n',
+              '    private var radioUiState = RadioUiState()\n    private var pttAudioEngine: PttAudioEngine? = null\n    private var pendingPttStart = false\n    private var pttTransmitting = false\n'
+          )
+          s = s.replace(
+              '    override fun onDestroy() {\n        mumble?.disconnect()',
+              '    override fun onDestroy() {\n        pttAudioEngine?.stop()\n        mumble?.disconnect()'
+          )
+          status_old = '''                    if (!connected && message != "Kobler til Mumble …") {
+                        activeChannelId = null
+                        updateActiveChannelLabel()
+                    }
+                    renderChannels()'''
+          status_new = '''                    if (!connected && message != "Kobler til Mumble …") {
+                        stopPtt()
+                        activeChannelId = null
+                        updateActiveChannelLabel()
+                    }
+                    renderChannels()
+                    updatePttButton()'''
+          if status_old not in s:
+              raise SystemExit('status block not found')
+          s = s.replace(status_old, status_new, 1)
+
+          card_marker = '''    private fun card(): LinearLayout = LinearLayout(this).apply {'''
+          ptt_methods = '''    private fun startPtt() {
+        if (!mumbleConnected) {
+            Toast.makeText(this, "Koble til Mumble først.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pendingPttStart = true
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO)
+            return
+        }
+        pendingPttStart = false
+        if (pttAudioEngine == null) {
+            pttAudioEngine = PttAudioEngine(
+                sendFrame = { opus, frame, terminator ->
+                    mumble?.sendVoiceFrame(opus, frame, terminator) == true
+                },
+                onState = { state ->
+                    runOnUiThread {
+                        if (state.startsWith("PTT-feil") || state.startsWith("Mikrofon")) {
+                            Toast.makeText(this, state, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            )
+        }
+        pttTransmitting = pttAudioEngine?.start() == true
+        updatePttButton()
+    }
+
+    private fun stopPtt() {
+        pendingPttStart = false
+        pttAudioEngine?.stop()
+        pttTransmitting = false
+        updatePttButton()
+    }
+
+    private fun updatePttButton() {
+        if (!::pttButton.isInitialized) return
+        pttButton.isEnabled = mumbleConnected
+        when {
+            pttTransmitting -> {
+                pttButton.text = "🔴  SENDER – SLIPP FOR Å STOPPE"
+                pttButton.setTextColor(Color.WHITE)
+                pttButton.background = rounded(Color.rgb(190, 55, 45), 12)
+            }
+            mumbleConnected -> {
+                pttButton.text = "🎙  HOLD INNE FOR Å SNAKKE"
+                pttButton.setTextColor(Color.WHITE)
+                pttButton.background = rounded(navy, 12)
+            }
+            else -> {
+                pttButton.text = "🎙  PTT – KOBLE TIL FØRST"
+                pttButton.setTextColor(disabledText)
+                pttButton.background = rounded(Color.rgb(232, 239, 247), 12)
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_RECORD_AUDIO) return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && pendingPttStart) {
+            startPtt()
+        } else {
+            pendingPttStart = false
+            Toast.makeText(this, "Mikrofontilgang er nødvendig for PTT.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+'''
+          if card_marker not in s:
+              raise SystemExit('card marker not found')
+          s = s.replace(card_marker, ptt_methods + card_marker, 1)
+
+          old_ptt = '''        channelCard.addView(
+            Button(this).apply {
+                text = "🎙   PTT – IKKE TILGJENGELIG ENNÅ"
+                isEnabled = false
+                textSize = 17f
+                minHeight = dp(82)
+                background = rounded(Color.rgb(232, 239, 247), 12)
+                setTextColor(disabledText)
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        channelCard.addView(spacer(12))
+        channelCard.addView(
+            text(
+                "ⓘ  Kanalbytte er aktivt. Lyd og PTT er ikke implementert ennå.",
+                13f,
+                muted
+            )
+        )'''
+          new_ptt = '''        pttButton = Button(this).apply {
+            textSize = 17f
+            minHeight = dp(82)
+            isAllCaps = false
+            setOnTouchListener { _, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startPtt()
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        stopPtt()
+                        performClick()
+                        true
+                    }
+                    else -> true
+                }
+            }
+        }
+        channelCard.addView(
+            pttButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        updatePttButton()
+
+        channelCard.addView(spacer(12))
+        channelCard.addView(
+            text(
+                "ⓘ  PTT-test: mikrofon → Opus → Mumble over kryptert TCP-tunnel. Mottakslyd kommer i neste lydsteg.",
+                13f,
+                muted
+            )
+        )'''
+          if old_ptt not in s:
+              raise SystemExit('old PTT UI block not found')
+          s = s.replace(old_ptt, new_ptt, 1)
+
+          s = s.replace(
+              '    }\n}',
+              '    }\n\n    companion object {\n        private const val REQUEST_RECORD_AUDIO = 4101\n    }\n}',
+              1
+          ) if False else s
+          # Insert companion object only at the final class closing brace.
+          final = '\n}'
+          idx = s.rfind(final)
+          if idx < 0:
+              raise SystemExit('final class brace not found')
+          s = s[:idx] + '''\n\n    companion object {\n        private const val REQUEST_RECORD_AUDIO = 4101\n    }''' + s[idx:]
+          p.write_text(s)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/no/oktodrive/app/MumbleClient.kt app/src/main/java/no/oktodrive/app/MainActivity.kt
+          git commit -m "Wire hold-to-talk microphone audio into Mumble tunnel"
+          git push
