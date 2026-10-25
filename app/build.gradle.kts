@@ -46,19 +46,6 @@ android {
         }
     }
 
-    packaging {
-        resources {
-            excludes += setOf(
-                "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
-                "META-INF/DEPENDENCIES",
-                "META-INF/LICENSE",
-                "META-INF/LICENSE.txt",
-                "META-INF/NOTICE",
-                "META-INF/NOTICE.txt"
-            )
-        }
-    }
-
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
 }
@@ -66,7 +53,6 @@ android {
 dependencies {
     implementation("com.google.protobuf:protobuf-javalite:3.25.5")
     implementation("io.voxkit:kopus:1.0.1")
-    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
     testImplementation("junit:junit:4.13.2")
 }
 
