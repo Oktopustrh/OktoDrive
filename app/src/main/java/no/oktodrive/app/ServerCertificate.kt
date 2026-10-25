@@ -49,6 +49,7 @@ internal object ServerCertificate {
         for (address in addresses) {
             val socket = context.socketFactory.createSocket() as SSLSocket
             try {
+                socket.enabledProtocols = arrayOf("TLSv1.2")
                 socket.soTimeout = timeoutMs
                 socket.connect(InetSocketAddress(address, port), timeoutMs)
                 return socket
@@ -65,7 +66,7 @@ internal object ServerCertificate {
     }
 
     private fun newContext(trustManager: X509TrustManager): SSLContext =
-        SSLContext.getInstance("TLS").apply {
+        SSLContext.getInstance("TLSv1.2").apply {
             init(
                 ClientIdentity.keyManagers(),
                 arrayOf<javax.net.ssl.TrustManager>(trustManager),
