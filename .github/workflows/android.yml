@@ -33,12 +33,15 @@ jobs:
           else
             echo "::warning::Persistent signing secret is not configured; this build will use Android's temporary debug key."
           fi
-      - name: Show version in app header
+      - name: Show full test build version in app and Mumble
         shell: bash
         run: |
           VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)
           test -n "$VERSION"
-          sed -i "s/text(\"OktoDrive\", 28f/text(\"OktoDrive $VERSION\", 28f/" app/src/main/java/no/oktodrive/app/MainActivity.kt
+          DISPLAY_VERSION="${VERSION}.${GITHUB_RUN_NUMBER}"
+          echo "OktoDrive test build: $DISPLAY_VERSION"
+          sed -i "s/text(\"OktoDrive\", 28f/text(\"OktoDrive $DISPLAY_VERSION\", 28f/" app/src/main/java/no/oktodrive/app/MainActivity.kt
+          sed -i -E "s/\.setRelease\(\"OktoDrive [^\"]*\"\)/.setRelease(\"OktoDrive $DISPLAY_VERSION\")/" app/src/main/java/no/oktodrive/app/MumbleClient.kt
       - name: Install Android SDK packages
         shell: bash
         run: |
