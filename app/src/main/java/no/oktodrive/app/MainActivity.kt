@@ -10,6 +10,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -31,7 +32,7 @@ import java.net.URL
  * Early OktoDrive radio UI.
  *
  * Mumble login, channel discovery and confirmed channel switching are implemented.
- * Audio transmission/reception and PTT are not implemented yet.
+ * Opus send/receive and hold-to-talk use the encrypted Mumble TCP tunnel.
  */
 class MainActivity : Activity() {
 
@@ -50,7 +51,6 @@ class MainActivity : Activity() {
     private var activeChannelId: Int? = null
     private var radioUiState = RadioUiState()
     private var pttAudioEngine: PttAudioEngine? = null
-    private var pendingPttStart = false
     private var pttTransmitting = false
 
     private val navy = Color.rgb(10, 49, 105)
@@ -60,7 +60,17 @@ class MainActivity : Activity() {
     private val muted = Color.rgb(88, 112, 145)
     private val disabledText = Color.rgb(150, 164, 184)
 
-    private val releaseApi = "https://api.github.com/repos/Oktopustrh/OktoDrive/releases/latest"
+    private val releaseApi: String
+        get() = if (packageName.endsWith(".dev"))
+            "https://api.github.com/repos/Oktopustrh/OktoDrive/releases/tags/dev-latest"
+        else "https://api.github.com/repos/Oktopustrh/OktoDrive/releases/latest"
+    private val hardwarePtt = HardwareButtonState()
+    private val hardwareMute = HardwareButtonState()
+
+    override fun onPause() {
+        stopPtt()
+        super.onPause()
+    }
 
     override fun onDestroy() {
         pttAudioEngine?.stop()
@@ -72,55 +82,20 @@ class MainActivity : Activity() {
         status.text = "●  Tester server …"
         status.setTextColor(muted)
         button.isEnabled = false
-        val pinKey = "cert_sha256_${host.lowercase()}:$port"
-        val knownPin = prefs.getString(pinKey, null)
         Thread {
             try {
-                val certificate = ServerCertificate.discover(host, port)
-                val fingerprint = ServerCertificate.fingerprint(certificate)
-                if (knownPin != null) {
-                    if (knownPin != fingerprint) {
-                        runOnUiThread {
-                            finishServerTest(status, button)
-                            AlertDialog.Builder(this)
-                                .setTitle("ADVARSEL: Serversertifikatet er endret")
-                                .setMessage(
-                                    "Tilkoblingen er blokkert. Serveren $host:$port viser nå et annet sertifikat. " +
-                                        "Kontroller endringen med serveradministrator før du eventuelt glemmer det lagrede sertifikatet i menyen.\n\n" +
-                                        "Nytt SHA-256:\n$fingerprint"
-                                )
-                                .setPositiveButton("OK", null)
-                                .show()
-                        }
-                        return@Thread
-                    }
-                    ServerCertificate.verifyPinned(host, port, knownPin)
-                    runOnUiThread {
-                        finishServerTest(status, button)
-                        AlertDialog.Builder(this)
-                            .setTitle("Sikker TLS-forbindelse bekreftet")
-                            .setMessage("Serversertifikatet samsvarer med lagret SHA-256. Du kan nå koble til Mumble.")
-                            .setPositiveButton("OK", null)
-                            .show()
-                    }
-                } else {
-                    runOnUiThread {
-                        finishServerTest(status, button)
-                        AlertDialog.Builder(this)
-                            .setTitle("Nytt serversertifikat")
-                            .setMessage(
-                                "Server: $host:$port\n\n" +
-                                    "Utsteder: ${certificate.issuerX500Principal.name}\n\n" +
-                                    "SHA-256:\n$fingerprint\n\n" +
-                                    "Sammenlign fingeravtrykket med serverens sertifikat via en uavhengig, pålitelig kanal før du godkjenner."
-                            )
-                            .setNegativeButton("Avbryt", null)
-                            .setPositiveButton("Jeg har kontrollert – godkjenn") { _, _ ->
-                                prefs.edit().putString(pinKey, fingerprint).apply()
-                                testServer(host, port, status, button)
-                            }
-                            .show()
-                    }
+                ServerCertificate.open(host, port, ClientIdentity.keyManagers()).use { }
+                runOnUiThread {
+                    finishServerTest(status, button)
+                    AlertDialog.Builder(this)
+                        .setTitle("Sikker TLS-forbindelse bekreftet")
+                        .setMessage(
+                            if (ServerCertificate.usesTemporaryPin(host, port))
+                                "Serverens sertifikat samsvarer med den faste SHA-256-pinnen."
+                            else "Serverens CA-kjede og vertsnavn er validert."
+                        )
+                        .setPositiveButton("OK", null)
+                        .show()
                 }
             } catch (e: Exception) {
                 runOnUiThread {
@@ -141,100 +116,186 @@ class MainActivity : Activity() {
         button.isEnabled = true
     }
 
+    private fun readJson(address: String): JSONObject {
+        val connection = (URL(address).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 8000
+            readTimeout = 8000
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("User-Agent", "OktoDrive-Android")
+        }
+        try {
+            if (connection.responseCode == 404) throw java.io.FileNotFoundException()
+            if (connection.responseCode != 200)
+                throw IllegalStateException("Tjenesten svarte " + connection.responseCode)
+            return JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+        } finally { connection.disconnect() }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun installedSigners(): Set<String> {
+        val signatures = if (android.os.Build.VERSION.SDK_INT >= 28) {
+            packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+                .signingInfo?.apkContentsSigners.orEmpty()
+        } else {
+            packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNATURES).signatures.orEmpty()
+        }
+        return signatures.map { signature ->
+            java.security.MessageDigest.getInstance("SHA-256").digest(signature.toByteArray())
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        }.toSet()
+    }
+
     private fun checkForUpdates(manual: Boolean) {
         Thread {
             try {
-                val connection = (URL(releaseApi).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 8000
-                    readTimeout = 8000
-                    setRequestProperty("Accept", "application/vnd.github+json")
-                    setRequestProperty("User-Agent", "OktoDrive-Android")
+                val release = readJson(releaseApi)
+                val assetName = if (packageName.endsWith(".dev")) "update-dev.json" else "update-stable.json"
+                val assets = release.getJSONArray("assets")
+                var manifestUrl: String? = null
+                for (i in 0 until assets.length()) {
+                    val asset = assets.getJSONObject(i)
+                    if (asset.optString("name") == assetName) manifestUrl = asset.getString("browser_download_url")
                 }
-                try {
-                    val code = connection.responseCode
-                    if (code == 404) {
-                        if (manual) runOnUiThread {
-                            AlertDialog.Builder(this)
-                                .setMessage("Ingen publisert OktoDrive-versjon ennå. Utviklingsbygg ligger foreløpig på GitHub Actions.")
-                                .setPositiveButton("OK", null)
-                                .show()
-                        }
-                        return@Thread
-                    }
-                    if (code != 200) throw IllegalStateException("GitHub svarte HTTP $code")
-                    val release = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
-                    val assets = release.optJSONArray("assets")
-                    var apkUrl: String? = null
-                    if (assets != null) {
-                        for (i in 0 until assets.length()) {
-                            val asset = assets.getJSONObject(i)
-                            if (asset.optString("name").endsWith(".apk", ignoreCase = true)) {
-                                apkUrl = asset.optString("browser_download_url")
-                                break
-                            }
-                        }
-                    }
-                    val tag = release.optString("tag_name")
-                    val version = tag.removePrefix("v").split(".")
-                    val publishedCode = version.getOrNull(0)?.toIntOrNull()?.let { major ->
-                        val minor = version.getOrNull(1)?.toIntOrNull() ?: 0
-                        val patch = version.getOrNull(2)?.toIntOrNull() ?: 0
-                        major * 1_000_000 + minor * 1_000 + patch
-                    }
-                    val installed = packageManager.getPackageInfo(packageName, 0)
-                    @Suppress("DEPRECATION")
-                    val currentCode = if (android.os.Build.VERSION.SDK_INT >= 28) {
-                        installed.longVersionCode
-                    } else {
-                        installed.versionCode.toLong()
-                    }
-                    val downloadUrl = apkUrl
-                    if (downloadUrl != null && publishedCode != null && publishedCode > currentCode) {
-                        runOnUiThread {
-                            AlertDialog.Builder(this)
-                                .setTitle("Ny OktoDrive-versjon: $tag")
-                                .setMessage("Vil du laste ned oppdateringen? Android ber deg bekrefte installasjonen.")
-                                .setNegativeButton("Senere", null)
-                                .setPositiveButton("Last ned") { _, _ ->
-                                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(downloadUrl)))
+                val address = manifestUrl ?: throw java.io.FileNotFoundException()
+                val uri = java.net.URI(address)
+                require(uri.scheme == "https" && uri.host == "github.com" &&
+                    uri.rawPath.startsWith("/Oktopustrh/OktoDrive/releases/download/")) {
+                    "Ugyldig oppdateringskilde"
+                }
+                val manifest = readJson(address)
+                val update = AppUpdate(
+                    manifest.getString("applicationId"), manifest.getLong("versionCode"),
+                    manifest.getString("versionName"), manifest.getInt("minSdk"),
+                    manifest.getString("certificateSha256"), manifest.getString("downloadUrl")
+                )
+                val installed = packageManager.getPackageInfo(packageName, 0)
+                @Suppress("DEPRECATION")
+                val current = if (android.os.Build.VERSION.SDK_INT >= 28) installed.longVersionCode
+                    else installed.versionCode.toLong()
+                val reason = UpdatePolicy.rejection(update, packageName, current,
+                    android.os.Build.VERSION.SDK_INT, installedSigners())
+                runOnUiThread {
+                    if (reason == null) {
+                        AlertDialog.Builder(this)
+                            .setTitle("Ny OktoDrive-versjon: " + update.versionName)
+                            .setMessage("Last ned og åpne APK-filen. Android ber deg bekrefte installasjonen. Innstillingene beholdes ved oppdatering.")
+                            .setNegativeButton("Senere", null)
+                            .setPositiveButton("Last ned") { _, _ ->
+                                try {
+                                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.downloadUrl)))
+                                } catch (_: android.content.ActivityNotFoundException) {
+                                    Toast.makeText(this, "Ingen nettleser er tilgjengelig for nedlasting.", Toast.LENGTH_LONG).show()
                                 }
-                                .show()
-                        }
+                            }.show()
                     } else if (manual) {
-                        runOnUiThread {
-                            AlertDialog.Builder(this)
-                                .setMessage("Ingen nyere publisert APK er tilgjengelig akkurat nå.")
-                                .setPositiveButton("OK", null)
-                                .show()
-                        }
+                        AlertDialog.Builder(this).setTitle("Oppdatering")
+                            .setMessage(reason).setPositiveButton("OK", null).show()
                     }
-                } finally {
-                    connection.disconnect()
+                }
+            } catch (_: java.io.FileNotFoundException) {
+                if (manual) runOnUiThread {
+                    AlertDialog.Builder(this).setTitle("Oppdatering")
+                        .setMessage("Ingen oppdatering er publisert for denne appvarianten ennå.")
+                        .setPositiveButton("OK", null).show()
                 }
             } catch (e: Exception) {
                 if (manual) runOnUiThread {
-                    AlertDialog.Builder(this)
-                        .setMessage("Kunne ikke sjekke oppdateringer: ${e.localizedMessage}")
-                        .setPositiveButton("OK", null)
-                        .show()
+                    AlertDialog.Builder(this).setTitle("Oppdatering")
+                        .setMessage("Kunne ikke sjekke oppdateringer: " + e.localizedMessage)
+                        .setPositiveButton("OK", null).show()
                 }
             }
         }.start()
     }
 
-    private fun startMumble(host: String, port: Int, name: String, password: String) {
-        val pin = prefs.getString("cert_sha256_${host.lowercase()}:$port", null)
-        if (pin == null) {
-            AlertDialog.Builder(this)
-                .setTitle("Sertifikat må godkjennes")
-                .setMessage("Trykk TEST SERVERFORBINDELSE først, kontroller fingeravtrykket og godkjenn serversertifikatet.")
-                .setPositiveButton("OK", null)
-                .show()
-            return
-        }
+    private fun binding(action: String): HardwareButton? {
+        if (!prefs.contains("button_" + action + "_code")) return null
+        return HardwareButton(prefs.getInt("button_" + action + "_code", -1),
+            prefs.getInt("button_" + action + "_scan", -1))
+    }
 
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val ptt = binding("ptt")
+        val mute = binding("mute")
+        if (ptt?.matches(event.keyCode, event.scanCode) == true) {
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> if (hardwarePtt.press(event.repeatCount)) startPtt()
+                KeyEvent.ACTION_UP -> { hardwarePtt.release(); stopPtt() }
+            }
+            return true
+        }
+        if (mute?.matches(event.keyCode, event.scanCode) == true) {
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> hardwareMute.press(event.repeatCount)
+                KeyEvent.ACTION_UP -> if (hardwareMute.release() && !event.isCanceled) toggleSpeakerMute()
+            }
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) stopPtt()
+    }
+
+    private fun configureButtons() {
+        stopPtt()
+        AlertDialog.Builder(this)
+            .setTitle("TM7 / Android-puck")
+            .setItems(arrayOf("Lær PTT-knapp", "Lær høyttaler-mute", "Vis lagrede knapper", "Fjern knappkoblinger")) { _, which ->
+                when (which) {
+                    0 -> learnButton("ptt")
+                    1 -> learnButton("mute")
+                    2 -> AlertDialog.Builder(this).setTitle("Lagrede knapper")
+                        .setMessage("PTT: " + (binding("ptt")?.toString() ?: "Ikke valgt") +
+                            "\nMute: " + (binding("mute")?.toString() ?: "Ikke valgt"))
+                        .setPositiveButton("OK", null).show()
+                    3 -> {
+                        prefs.edit().remove("button_ptt_code").remove("button_ptt_scan")
+                            .remove("button_mute_code").remove("button_mute_scan").apply()
+                        Toast.makeText(this, "Knappkoblinger fjernet.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }.setNegativeButton("Lukk", null).show()
+    }
+
+    private fun learnButton(action: String) {
+        stopPtt()
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(if (action == "ptt") "Lær PTT-knapp" else "Lær mute-knapp")
+            .setMessage("Trykk og slipp den fysiske knappen. Ingen tale sendes under innlæring.\n\nHvis ingenting registreres, sender enheten ikke vanlige knappesignaler til appen.")
+            .setNegativeButton("Avbryt", null).create()
+        var candidate: HardwareButton? = null
+        dialog.setOnKeyListener { _, code, event ->
+            if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_HOME ||
+                code == KeyEvent.KEYCODE_POWER) return@setOnKeyListener false
+            if (code == KeyEvent.KEYCODE_UNKNOWN && event.scanCode == 0) return@setOnKeyListener false
+            val key = HardwareButton(code, event.scanCode)
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                candidate = key
+                dialog.setMessage("Registrert: " + KeyEvent.keyCodeToString(code) +
+                    " (scan " + event.scanCode + "). Slipp knappen for å lagre.")
+            } else if (event.action == KeyEvent.ACTION_UP && candidate == key) {
+                if (!event.isCanceled) {
+                    val other = if (action == "ptt") "mute" else "ptt"
+                    if (binding(other) == key) {
+                        Toast.makeText(this, "Knappen er allerede brukt til den andre funksjonen.", Toast.LENGTH_LONG).show()
+                    } else {
+                        prefs.edit().putInt("button_" + action + "_code", code)
+                            .putInt("button_" + action + "_scan", event.scanCode).apply()
+                        Toast.makeText(this, "Knappen er lagret. Test den mens appen er åpen.", Toast.LENGTH_LONG).show()
+                    }
+                }
+                dialog.dismiss()
+            }
+            true
+        }
+        dialog.show()
+    }
+    private fun startMumble(host: String, port: Int, name: String, password: String) {
         connectButton.isEnabled = false
-        mumble = MumbleClient(host, port, name, password, pin, object : MumbleClient.Listener {
+        mumble = MumbleClient(host, port, name, password, object : MumbleClient.Listener {
             override fun onStatus(message: String, connected: Boolean) {
                 runOnUiThread {
                     mumbleConnected = connected
@@ -287,6 +348,7 @@ class MainActivity : Activity() {
                 }
             }
         })
+        mumble?.setSpeakerMuted(radioUiState.speakerMuted)
         mumble?.connect()
     }
 
@@ -437,6 +499,7 @@ class MainActivity : Activity() {
 
     private fun toggleSpeakerMute() {
         radioUiState = radioUiState.copy(speakerMuted = !radioUiState.speakerMuted)
+        mumble?.setSpeakerMuted(radioUiState.speakerMuted)
         updateMuteButton()
     }
 
@@ -452,16 +515,16 @@ class MainActivity : Activity() {
             return
         }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            pendingPttStart = true
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO)
             return
         }
-        pendingPttStart = false
         if (pttAudioEngine == null) {
             pttAudioEngine = PttAudioEngine(
                 sendFrame = { opus, frame, terminator -> mumble?.sendVoiceFrame(opus, frame, terminator) == true },
                 onState = { state ->
                     runOnUiThread {
+                        pttTransmitting = pttAudioEngine?.isRunning() == true
+                        updatePttButton()
                         if (state.startsWith("PTT-feil") || state.startsWith("Mikrofon")) {
                             Toast.makeText(this, state, Toast.LENGTH_LONG).show()
                         }
@@ -474,7 +537,8 @@ class MainActivity : Activity() {
     }
 
     private fun stopPtt() {
-        pendingPttStart = false
+        hardwarePtt.release()
+        hardwareMute.release()
         pttAudioEngine?.stop()
         pttTransmitting = false
         updatePttButton()
@@ -505,10 +569,9 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQUEST_RECORD_AUDIO) return
-        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && pendingPttStart) {
-            startPtt()
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Mikrofon klar. Hold PTT inne for å snakke.", Toast.LENGTH_SHORT).show()
         } else {
-            pendingPttStart = false
             Toast.makeText(this, "Mikrofontilgang er nødvendig for PTT.", Toast.LENGTH_LONG).show()
         }
     }
@@ -575,33 +638,18 @@ class MainActivity : Activity() {
             setOnClickListener { anchor ->
                 PopupMenu(this@MainActivity, anchor).apply {
                     menu.add("Se etter oppdatering")
+                    menu.add("Konfigurer radioknapper")
                     menu.add("Grensesnitt: Automatisk")
                     menu.add("Grensesnitt: Mobil")
                     menu.add("Grensesnitt: Radio")
-                    menu.add("Glem lagret serversertifikat")
                     menu.add("Om OktoDrive")
                     setOnMenuItemClickListener { item ->
                         when (item.title.toString()) {
                             "Se etter oppdatering" -> checkForUpdates(manual = true)
+                            "Konfigurer radioknapper" -> configureButtons()
                             "Grensesnitt: Automatisk" -> setUiMode(UiMode.AUTO)
                             "Grensesnitt: Mobil" -> setUiMode(UiMode.MOBILE)
                             "Grensesnitt: Radio" -> setUiMode(UiMode.RADIO)
-                            "Glem lagret serversertifikat" -> {
-                                val host = prefs.getString("host", "ts.veiensvenner.no") ?: "ts.veiensvenner.no"
-                                val port = prefs.getString("port", "64738") ?: "64738"
-                                val pinKey = "cert_sha256_${host.lowercase()}:$port"
-                                AlertDialog.Builder(this@MainActivity)
-                                    .setTitle("Glem serversertifikat?")
-                                    .setMessage(
-                                        "Dette fjerner den lagrede sikkerhetskontrollen for $host:$port. " +
-                                            "Gjør det bare hvis serveradministrator har bekreftet sertifikatendringen."
-                                    )
-                                    .setNegativeButton("Avbryt", null)
-                                    .setPositiveButton("Glem") { _, _ ->
-                                        prefs.edit().remove(pinKey).apply()
-                                    }
-                                    .show()
-                            }
                             "Om OktoDrive" -> Toast.makeText(
                                 this@MainActivity,
                                 "OktoDrive – tidlig utviklerversjon",
@@ -755,6 +803,7 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
         )
+        mumble?.setSpeakerMuted(radioUiState.speakerMuted)
         updateMuteButton()
         channelCard.addView(spacer(10))
 
@@ -789,7 +838,7 @@ class MainActivity : Activity() {
         channelCard.addView(spacer(12))
         channelCard.addView(
             text(
-                "ⓘ  PTT-test: mikrofon → Opus → Mumble over kryptert TCP-tunnel. Mottakslyd kommer i neste lydsteg.",
+                "ⓘ  PTT-test: mikrofon → Opus → Mumble over kryptert TCP-tunnel. Mottakslyd er aktiv.",
                 13f,
                 muted
             )

@@ -1,13 +1,18 @@
-name: Publish signed OktoDrive APK
-
-# Only publish releases with a persistent signing key. This prevents
-# uninstall/reinstall failures caused by GitHub's ephemeral debug key.
+name: Publish signed OktoDrive update
 on:
   workflow_dispatch:
-
+    inputs:
+      channel:
+        description: App variant to publish
+        type: choice
+        options: [dev, stable]
+        default: dev
+        required: true
 permissions:
   contents: write
-
+concurrency:
+  group: publish-${{ inputs.channel }}
+  cancel-in-progress: false
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -20,40 +25,40 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Require persistent signing credentials
+      - name: Require persistent signing key
         env:
           KEYSTORE_BASE64: ${{ secrets.OKTODRIVE_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.OKTODRIVE_STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.OKTODRIVE_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.OKTODRIVE_KEY_PASSWORD }}
-        shell: bash
         run: |
-          if [[ -z "$KEYSTORE_BASE64" || -z "$STORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
-            echo "::error::Persistent signing credentials must be configured before publishing."
-            exit 1
-          fi
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/oktodrive-release.jks"
-          echo "OKTODRIVE_KEYSTORE_PATH=$RUNNER_TEMP/oktodrive-release.jks" >> "$GITHUB_ENV"
-      - name: Install Android SDK packages
-        shell: bash
+          test -n "$KEYSTORE_BASE64" && test -n "$STORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD" || { echo "::error::Configure all four persistent signing secrets first."; exit 1; }
+          printf "%s" "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/oktodrive.jks"
+          echo "OKTODRIVE_KEYSTORE_PATH=$RUNNER_TEMP/oktodrive.jks" >> "$GITHUB_ENV"
+          echo "OKTODRIVE_TEST_KEYSTORE_PATH=$RUNNER_TEMP/oktodrive.jks" >> "$GITHUB_ENV"
+      - name: Install SDK
         run: |
-          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)
           test -n "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" --install 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Build signed release
+          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0"
+      - name: Test and build signed APK
         env:
+          CHANNEL: ${{ inputs.channel }}
           OKTODRIVE_STORE_PASSWORD: ${{ secrets.OKTODRIVE_STORE_PASSWORD }}
           OKTODRIVE_KEY_ALIAS: ${{ secrets.OKTODRIVE_KEY_ALIAS }}
           OKTODRIVE_KEY_PASSWORD: ${{ secrets.OKTODRIVE_KEY_PASSWORD }}
-        run: gradle --no-daemon :app:assembleRelease
-      - name: Publish GitHub Release
+          OKTODRIVE_TEST_STORE_PASSWORD: ${{ secrets.OKTODRIVE_STORE_PASSWORD }}
+          OKTODRIVE_TEST_KEY_ALIAS: ${{ secrets.OKTODRIVE_KEY_ALIAS }}
+          OKTODRIVE_TEST_KEY_PASSWORD: ${{ secrets.OKTODRIVE_KEY_PASSWORD }}
+        run: |
+          if [ "$CHANNEL" = dev ]; then
+            gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+          else
+            gradle --no-daemon :app:testDebugUnitTest :app:assembleRelease
+          fi
+      - name: Verify and publish update
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)
-          test -n "$VERSION"
-          cp app/build/outputs/apk/release/app-release.apk "OktoDrive-$VERSION.apk"
-          gh release create "v$VERSION" "OktoDrive-$VERSION.apk" --title "OktoDrive v$VERSION" --notes "Android testversjon. Installer med samme signeringsnøkkel for fremtidige oppdateringer." --target "$GITHUB_SHA"
+          CHANNEL: ${{ inputs.channel }}
+        run: bash tools/publish_update.sh

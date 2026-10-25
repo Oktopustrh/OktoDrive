@@ -20,13 +20,13 @@ import no.oktodrive.app.proto.UserRemove
 import no.oktodrive.app.proto.UserState
 import no.oktodrive.app.proto.Version as MumbleVersion
 import no.oktodrive.app.proto.udp.Audio as UdpAudio
+import no.oktodrive.app.proto.udp.Ping as UdpPing
 
 internal class MumbleClient(
     private val host: String,
     private val port: Int,
     private val username: String,
     private val password: String,
-    private val fingerprint: String,
     private val listener: Listener
 ) {
     interface Listener {
@@ -87,7 +87,7 @@ internal class MumbleClient(
                             false
                         )
 
-                        val tls = ServerCertificate.openPinned(host, port, fingerprint)
+                        val tls = ServerCertificate.open(host, port, ClientIdentity.keyManagers())
                         socket = tls
                         tls.soTimeout = READ_TIMEOUT_MS
                         val input = DataInputStream(tls.inputStream)
@@ -203,6 +203,7 @@ internal class MumbleClient(
             TYPE_SERVER_SYNC -> {
                 val sync = ServerSync.parseFrom(payload)
                 ownSession = if (sync.hasSession()) sync.session else null
+                forceTcpTunnel()
                 listener.onStatus("Tilkoblet Mumble som $username", true)
                 listener.onChannels(channels.values.toList())
                 listener.onUsers(snapshotUsers())
@@ -272,6 +273,20 @@ internal class MumbleClient(
                     }
                 )
             }
+        }
+    }
+
+    // Previously injected by CI into build 143; keep identical behavior in local/release builds.
+    private fun forceTcpTunnel() {
+        val output = controlOutput ?: return
+        try {
+            val ping = UdpPing.newBuilder().setTimestamp(System.currentTimeMillis()).build().toByteArray()
+            val packet = ByteArray(ping.size + 1)
+            packet[0] = UDP_TYPE_PING.toByte()
+            ping.copyInto(packet, destinationOffset = 1)
+            send(output, TYPE_UDP_TUNNEL, packet)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not request tunneled receive audio", e)
         }
     }
 
@@ -532,6 +547,7 @@ internal class MumbleClient(
 
         private const val PROTOBUF_UDP_VERSION = 0x010500
         private const val UDP_TYPE_AUDIO = 0
+        private const val UDP_TYPE_PING = 1
         private const val LEGACY_OPUS_TYPE = 4
         private const val LEGACY_OPUS_HEADER = LEGACY_OPUS_TYPE shl 5
         private const val LEGACY_TERMINATOR_BIT = 1L shl 13
