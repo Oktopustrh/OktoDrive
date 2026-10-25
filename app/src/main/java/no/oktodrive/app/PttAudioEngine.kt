@@ -9,6 +9,7 @@ import io.voxkit.kopus.Opus
 import io.voxkit.kopus.OpusApplication
 import io.voxkit.kopus.OpusEncoder
 import io.voxkit.kopus.SampleRate
+import io.voxkit.kopus.encoder
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -59,11 +60,12 @@ internal class PttAudioEngine(
         worker = Thread({
             var encoder: OpusEncoder? = null
             try {
-                encoder = Opus.encoder(
+                val activeEncoder = Opus.encoder(
                     sampleRate = SampleRate.RATE_48K,
                     channels = Channels.MONO,
                     application = OpusApplication.VOIP
                 )
+                encoder = activeEncoder
                 val pcm = ShortArray(FRAME_SAMPLES)
                 val encoded = ByteArray(OpusEncoder.DEFAULT_OUTPUT_BUFFER_SIZE)
                 audioRecord.startRecording()
@@ -79,7 +81,7 @@ internal class PttAudioEngine(
                     }
                     if (!running.get() || filled != FRAME_SAMPLES) break
 
-                    val encodedLength = encoder.encode(pcm, FRAME_SAMPLES, encoded)
+                    val encodedLength = activeEncoder.encode(pcm, FRAME_SAMPLES, encoded)
                     if (encodedLength <= 0) continue
                     val packet = encoded.copyOf(encodedLength)
                     if (!sendFrame(packet, frameNumber, false)) {
