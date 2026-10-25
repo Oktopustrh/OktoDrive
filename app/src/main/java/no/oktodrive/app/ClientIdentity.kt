@@ -6,6 +6,7 @@ import java.math.BigInteger
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.SecureRandom
+import java.security.spec.ECGenParameterSpec
 import java.util.Calendar
 import javax.net.ssl.KeyManager
 import javax.net.ssl.KeyManagerFactory
@@ -21,10 +22,11 @@ import javax.security.auth.x500.X500Principal
  */
 internal object ClientIdentity {
     private const val KEYSTORE = "AndroidKeyStore"
-    // v2 intentionally forces regeneration after the first TLS client-auth
-    // implementation used RSA-PSS, which is not reliable with Conscrypt/
-    // AndroidKeyStore during the Mumble handshake on all devices.
-    private const val ALIAS = "oktodrive-mumble-client-v2"
+
+    // v3 switches the Mumble client identity to ECDSA P-256. The previous RSA
+    // identity could fail inside Android/Conscrypt while TLS attempted to sign
+    // the CertificateVerify message on some devices.
+    private const val ALIAS = "oktodrive-mumble-client-v3"
 
     fun keyManagers(): Array<KeyManager> {
         val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
@@ -50,13 +52,12 @@ internal object ClientIdentity {
             ALIAS,
             KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
         )
-            .setKeySize(2048)
+            .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
             .setDigests(
                 KeyProperties.DIGEST_SHA256,
                 KeyProperties.DIGEST_SHA384,
                 KeyProperties.DIGEST_SHA512
             )
-            .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
             .setCertificateSubject(X500Principal("CN=OktoDrive Mumble Client"))
             .setCertificateSerialNumber(serial)
             .setCertificateNotBefore(notBefore)
@@ -64,7 +65,7 @@ internal object ClientIdentity {
             .setUserAuthenticationRequired(false)
             .build()
 
-        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, KEYSTORE).apply {
+        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, KEYSTORE).apply {
             initialize(spec)
             generateKeyPair()
         }
