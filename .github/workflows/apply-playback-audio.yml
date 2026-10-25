@@ -1,0 +1,158 @@
+name: Apply incoming audio playback
+
+on:
+  push:
+    branches: [ feature/opus-audio-prep ]
+    paths:
+      - '.github/workflows/apply-playback-audio.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/opus-audio-prep
+      - name: Wire incoming Mumble audio to playback engine
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path('app/src/main/java/no/oktodrive/app/MumbleClient.kt')
+          s = p.read_text()
+
+          s = s.replace(
+              '    private val channels = sortedMapOf<Int, Channel>()\n    private val users = mutableMapOf<Int, User>()',
+              '    private val channels = sortedMapOf<Int, Channel>()\n    private val users = mutableMapOf<Int, User>()\n    private val playback = PlaybackAudioEngine()'
+          )
+
+          old = '''                                    TYPE_UDP_TUNNEL -> {
+                                        Log.v(TAG, "Incoming tunneled UDP packet bytes=$length")
+                                    }'''
+          new = '''                                    TYPE_UDP_TUNNEL -> {
+                                        handleIncomingVoicePacket(payload)
+                                    }'''
+          if old not in s:
+              raise SystemExit('UDP tunnel block not found')
+          s = s.replace(old, new, 1)
+
+          marker = '''    fun sendVoiceFrame(opusData: ByteArray, frameNumber: Long, terminator: Boolean): Boolean {'''
+          methods = r'''    private fun handleIncomingVoicePacket(packet: ByteArray) {
+        if (packet.isEmpty()) return
+        try {
+            val first = packet[0].toInt() and 0xff
+            when {
+                first == UDP_TYPE_AUDIO && (serverVersionV1 ?: 0) >= PROTOBUF_UDP_VERSION -> {
+                    val audio = UdpAudio.parseFrom(packet.copyOfRange(1, packet.size))
+                    val sender = audio.senderSession
+                    if (sender == 0) return
+                    playback.enqueue(
+                        PlaybackAudioEngine.Frame(
+                            senderSession = sender,
+                            frameNumber = audio.frameNumber,
+                            opusData = audio.opusData.toByteArray(),
+                            terminator = audio.isTerminator
+                        )
+                    )
+                }
+
+                (first ushr 5) == LEGACY_OPUS_TYPE -> {
+                    var offset = 1
+                    val (session, afterSession) = readMumbleVarInt(packet, offset)
+                    offset = afterSession
+                    val (frame, afterFrame) = readMumbleVarInt(packet, offset)
+                    offset = afterFrame
+                    val (sizeField, afterSize) = readMumbleVarInt(packet, offset)
+                    offset = afterSize
+                    val terminator = (sizeField and LEGACY_TERMINATOR_BIT) != 0L
+                    val opusSize = (sizeField and LEGACY_SIZE_MASK).toInt()
+                    if (opusSize < 0 || offset + opusSize > packet.size) {
+                        throw IOException("Invalid legacy Opus frame size=$opusSize packet=${packet.size}")
+                    }
+                    playback.enqueue(
+                        PlaybackAudioEngine.Frame(
+                            senderSession = session.toInt(),
+                            frameNumber = frame,
+                            opusData = packet.copyOfRange(offset, offset + opusSize),
+                            terminator = terminator
+                        )
+                    )
+                }
+
+                first == UDP_TYPE_AUDIO -> {
+                    // Server version may not have arrived yet; try the modern protobuf format.
+                    val audio = UdpAudio.parseFrom(packet.copyOfRange(1, packet.size))
+                    val sender = audio.senderSession
+                    if (sender != 0) {
+                        playback.enqueue(
+                            PlaybackAudioEngine.Frame(
+                                senderSession = sender,
+                                frameNumber = audio.frameNumber,
+                                opusData = audio.opusData.toByteArray(),
+                                terminator = audio.isTerminator
+                            )
+                        )
+                    }
+                }
+
+                else -> Log.v(TAG, "Ignoring tunneled UDP type=$first bytes=${packet.size}")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Could not decode incoming tunneled voice packet", t)
+        }
+    }
+
+    private fun readMumbleVarInt(data: ByteArray, start: Int): Pair<Long, Int> {
+        var offset = start
+        fun next(): Int {
+            if (offset >= data.size) throw IOException("Truncated Mumble varint")
+            return data[offset++].toInt() and 0xff
+        }
+
+        val first = next()
+        val value = when {
+            (first and 0x80) == 0 -> (first and 0x7f).toLong()
+            (first and 0xc0) == 0x80 -> (((first and 0x3f).toLong() shl 8) or next().toLong())
+            (first and 0xe0) == 0xc0 -> (((first and 0x1f).toLong() shl 16) or (next().toLong() shl 8) or next().toLong())
+            (first and 0xf0) == 0xe0 -> (((first and 0x0f).toLong() shl 24) or (next().toLong() shl 16) or (next().toLong() shl 8) or next().toLong())
+            first == 0xf0 -> ((next().toLong() shl 24) or (next().toLong() shl 16) or (next().toLong() shl 8) or next().toLong())
+            first == 0xf4 -> {
+                var result = 0L
+                repeat(8) { result = (result shl 8) or next().toLong() }
+                result
+            }
+            else -> throw IOException("Unsupported signed Mumble varint prefix=0x${first.toString(16)}")
+        }
+        return value to offset
+    }
+
+    fun setSpeakerMuted(muted: Boolean) {
+        playback.setMuted(muted)
+    }
+
+'''
+          if marker not in s:
+              raise SystemExit('sendVoiceFrame marker not found')
+          s = s.replace(marker, methods + marker, 1)
+
+          s = s.replace(
+              '        private const val LEGACY_OPUS_HEADER = 4 shl 5\n        private const val LEGACY_TERMINATOR_BIT = 1L shl 13',
+              '        private const val LEGACY_OPUS_TYPE = 4\n        private const val LEGACY_OPUS_HEADER = LEGACY_OPUS_TYPE shl 5\n        private const val LEGACY_TERMINATOR_BIT = 1L shl 13\n        private const val LEGACY_SIZE_MASK = (1L shl 13) - 1'
+          )
+
+          # Playback engine belongs to this client instance; close it when the worker exits for good.
+          s = s.replace(
+              '                Log.i(TAG, "Mumble connection worker stopped")\n                listener.onStatus(if (everConnected) "Frakoblet" else "Ikke tilkoblet", false)',
+              '                playback.stop()\n                Log.i(TAG, "Mumble connection worker stopped")\n                listener.onStatus(if (everConnected) "Frakoblet" else "Ikke tilkoblet", false)'
+          )
+
+          p.write_text(s)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/no/oktodrive/app/MumbleClient.kt
+          git commit -m "Decode tunneled Mumble Opus audio for playback"
+          git push
