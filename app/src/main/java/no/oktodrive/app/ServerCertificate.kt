@@ -1,6 +1,5 @@
 package no.oktodrive.app
 
-import java.net.InetSocketAddress
 import java.security.MessageDigest
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
@@ -48,19 +47,25 @@ internal object ServerCertificate {
         } else {
             context.init(keyManagers, null, null) // Platform CA trust; no global TLS changes.
         }
-        val socket = context.socketFactory.createSocket() as SSLSocket
+        val transport = ServerConnection.connect(host, port)
+        var socket: SSLSocket? = null
         try {
-            socket.soTimeout = 12000
+            // Preserve the original hostname for SNI and normal hostname verification,
+            // even though the TCP connection uses a selected IPv4/IPv6 address.
+            val tls = context.socketFactory.createSocket(transport, host, port, true) as SSLSocket
+            socket = tls
+            tls.soTimeout = 12000
             if (!pinned) {
-                socket.sslParameters = socket.sslParameters.apply {
+                tls.sslParameters = tls.sslParameters.apply {
                     endpointIdentificationAlgorithm = "HTTPS"
                 }
             }
-            socket.connect(InetSocketAddress(host, port), 6000)
-            socket.startHandshake() // No credentials or Mumble messages before validation.
-            return socket
+            // Do not retry a different address or weaken validation on a TLS failure.
+            tls.startHandshake() // No credentials or Mumble messages before validation.
+            return tls
         } catch (e: Exception) {
-            try { socket.close() } catch (_: Exception) { }
+            try { socket?.close() } catch (_: Exception) { }
+            try { transport.close() } catch (_: Exception) { }
             throw e
         }
     }
