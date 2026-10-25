@@ -1,14 +1,17 @@
 package no.oktodrive.app
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -38,6 +41,7 @@ class MainActivity : Activity() {
     private lateinit var channelList: LinearLayout
     private lateinit var activeChannelText: TextView
     private lateinit var muteButton: Button
+    private lateinit var pttButton: Button
     private lateinit var connectButton: Button
     private lateinit var connectionStatus: TextView
     private var mumbleConnected = false
@@ -45,6 +49,9 @@ class MainActivity : Activity() {
     private var users: List<MumbleClient.User> = emptyList()
     private var activeChannelId: Int? = null
     private var radioUiState = RadioUiState()
+    private var pttAudioEngine: PttAudioEngine? = null
+    private var pendingPttStart = false
+    private var pttTransmitting = false
 
     private val navy = Color.rgb(10, 49, 105)
     private val blue = Color.rgb(25, 118, 210)
@@ -56,6 +63,7 @@ class MainActivity : Activity() {
     private val releaseApi = "https://api.github.com/repos/Oktopustrh/OktoDrive/releases/latest"
 
     override fun onDestroy() {
+        pttAudioEngine?.stop()
         mumble?.disconnect()
         super.onDestroy()
     }
@@ -237,10 +245,12 @@ class MainActivity : Activity() {
                     connectButton.text = if (connected) "KOBLE FRA" else "KOBLE TIL MUMBLE"
                     connectButton.isEnabled = connected || message != "Kobler til Mumble …"
                     if (!connected && message != "Kobler til Mumble …") {
+                        stopPtt()
                         activeChannelId = null
                         updateActiveChannelLabel()
                     }
                     renderChannels()
+                    updatePttButton()
                 }
             }
 
@@ -434,6 +444,73 @@ class MainActivity : Activity() {
         if (!::muteButton.isInitialized) return
         muteButton.text = if (radioUiState.speakerMuted) "🔇  LYD AV – TRYKK FOR LYD" else "🔊  MUTE HØYTTALER"
         muteButton.setTextColor(if (radioUiState.speakerMuted) Color.rgb(190, 55, 45) else navy)
+    }
+
+    private fun startPtt() {
+        if (!mumbleConnected) {
+            Toast.makeText(this, "Koble til Mumble først.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pendingPttStart = true
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO)
+            return
+        }
+        pendingPttStart = false
+        if (pttAudioEngine == null) {
+            pttAudioEngine = PttAudioEngine(
+                sendFrame = { opus, frame, terminator -> mumble?.sendVoiceFrame(opus, frame, terminator) == true },
+                onState = { state ->
+                    runOnUiThread {
+                        if (state.startsWith("PTT-feil") || state.startsWith("Mikrofon")) {
+                            Toast.makeText(this, state, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            )
+        }
+        pttTransmitting = pttAudioEngine?.start() == true
+        updatePttButton()
+    }
+
+    private fun stopPtt() {
+        pendingPttStart = false
+        pttAudioEngine?.stop()
+        pttTransmitting = false
+        updatePttButton()
+    }
+
+    private fun updatePttButton() {
+        if (!::pttButton.isInitialized) return
+        pttButton.isEnabled = mumbleConnected
+        when {
+            pttTransmitting -> {
+                pttButton.text = "🔴  SENDER – SLIPP FOR Å STOPPE"
+                pttButton.setTextColor(Color.WHITE)
+                pttButton.background = rounded(Color.rgb(190, 55, 45), 12)
+            }
+            mumbleConnected -> {
+                pttButton.text = "🎙  HOLD INNE FOR Å SNAKKE"
+                pttButton.setTextColor(Color.WHITE)
+                pttButton.background = rounded(navy, 12)
+            }
+            else -> {
+                pttButton.text = "🎙  PTT – KOBLE TIL FØRST"
+                pttButton.setTextColor(disabledText)
+                pttButton.background = rounded(Color.rgb(232, 239, 247), 12)
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_RECORD_AUDIO) return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && pendingPttStart) {
+            startPtt()
+        } else {
+            pendingPttStart = false
+            Toast.makeText(this, "Mikrofontilgang er nødvendig for PTT.", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun card(): LinearLayout = LinearLayout(this).apply {
@@ -681,30 +758,47 @@ class MainActivity : Activity() {
         updateMuteButton()
         channelCard.addView(spacer(10))
 
+        pttButton = Button(this).apply {
+            textSize = 17f
+            minHeight = dp(82)
+            isAllCaps = false
+            setOnTouchListener { _, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startPtt()
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        stopPtt()
+                        performClick()
+                        true
+                    }
+                    else -> true
+                }
+            }
+        }
         channelCard.addView(
-            Button(this).apply {
-                text = "🎙   PTT – IKKE TILGJENGELIG ENNÅ"
-                isEnabled = false
-                textSize = 17f
-                minHeight = dp(82)
-                background = rounded(Color.rgb(232, 239, 247), 12)
-                setTextColor(disabledText)
-            },
+            pttButton,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
         )
+        updatePttButton()
 
         channelCard.addView(spacer(12))
         channelCard.addView(
             text(
-                "ⓘ  Kanalbytte er aktivt. Lyd og PTT er ikke implementert ennå.",
+                "ⓘ  PTT-test: mikrofon → Opus → Mumble over kryptert TCP-tunnel. Mottakslyd kommer i neste lydsteg.",
                 13f,
                 muted
             )
         )
 
         root.addView(channelCard)
+    }
+
+    companion object {
+        private const val REQUEST_RECORD_AUDIO = 4101
     }
 }

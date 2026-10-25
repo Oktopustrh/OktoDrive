@@ -1,6 +1,8 @@
 package no.oktodrive.app
 
 import android.util.Log
+import com.google.protobuf.ByteString
+import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
@@ -17,6 +19,7 @@ import no.oktodrive.app.proto.ServerSync
 import no.oktodrive.app.proto.UserRemove
 import no.oktodrive.app.proto.UserState
 import no.oktodrive.app.proto.Version as MumbleVersion
+import no.oktodrive.app.proto.udp.Audio as UdpAudio
 
 /**
  * Minimal Mumble control-protocol client.
@@ -58,6 +61,7 @@ internal class MumbleClient(
     @Volatile private var socket: SSLSocket? = null
     @Volatile private var controlOutput: DataOutputStream? = null
     @Volatile private var ownSession: Int? = null
+    @Volatile private var serverVersionV1: Int? = null
     @Volatile private var lastRequestedChannelId: Int? = null
     private val channels = sortedMapOf<Int, Channel>()
     private val users = mutableMapOf<Int, User>()
@@ -139,6 +143,16 @@ internal class MumbleClient(
                                 input.readFully(payload)
 
                                 when (type) {
+                                    TYPE_VERSION -> {
+                                        val version = MumbleVersion.parseFrom(payload)
+                                        serverVersionV1 = if (version.hasVersionV1()) version.versionV1 else null
+                                        Log.i(TAG, "Server version_v1=${serverVersionV1?.let { String.format("0x%06x", it) } ?: "unknown"}")
+                                    }
+
+                                    TYPE_UDP_TUNNEL -> {
+                                        Log.v(TAG, "Incoming tunneled UDP packet bytes=$length")
+                                    }
+
                                     TYPE_REJECT -> {
                                         val reject = Reject.parseFrom(payload)
                                         val rejectType = if (reject.hasType()) reject.type.name else "Unknown"
@@ -350,6 +364,77 @@ internal class MumbleClient(
         }, "OktoDrive-Mumble").start()
     }
 
+    fun sendVoiceFrame(opusData: ByteArray, frameNumber: Long, terminator: Boolean): Boolean {
+        val output = controlOutput ?: return false
+        if (!desiredConnected.get() || ownSession == null) return false
+        return try {
+            val packet = buildVoicePacket(opusData, frameNumber, terminator)
+            send(output, TYPE_UDP_TUNNEL, packet)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Voice tunnel write failed", e)
+            false
+        }
+    }
+
+    private fun buildVoicePacket(opusData: ByteArray, frameNumber: Long, terminator: Boolean): ByteArray {
+        val useProtobufUdp = (serverVersionV1 ?: 0) >= PROTOBUF_UDP_VERSION
+        return if (useProtobufUdp) {
+            val audio = UdpAudio.newBuilder()
+                .setTarget(0)
+                .setFrameNumber(frameNumber)
+                .setOpusData(ByteString.copyFrom(opusData))
+                .setIsTerminator(terminator)
+                .build()
+                .toByteArray()
+            ByteArray(audio.size + 1).also { packet ->
+                packet[0] = UDP_TYPE_AUDIO.toByte()
+                audio.copyInto(packet, destinationOffset = 1)
+            }
+        } else {
+            val out = ByteArrayOutputStream(opusData.size + 16)
+            out.write(LEGACY_OPUS_HEADER)
+            writeMumbleVarInt(out, frameNumber)
+            val lengthField = opusData.size.toLong() or if (terminator) LEGACY_TERMINATOR_BIT else 0L
+            writeMumbleVarInt(out, lengthField)
+            out.write(opusData)
+            out.toByteArray()
+        }
+    }
+
+    private fun writeMumbleVarInt(out: ByteArrayOutputStream, value: Long) {
+        require(value >= 0) { "Only non-negative Mumble varints are used for voice packets" }
+        when {
+            value < 0x80L -> out.write(value.toInt())
+            value < 0x4000L -> {
+                out.write(((value shr 8) or 0x80L).toInt())
+                out.write((value and 0xffL).toInt())
+            }
+            value < 0x200000L -> {
+                out.write(((value shr 16) or 0xc0L).toInt())
+                out.write(((value shr 8) and 0xffL).toInt())
+                out.write((value and 0xffL).toInt())
+            }
+            value < 0x10000000L -> {
+                out.write(((value shr 24) or 0xe0L).toInt())
+                out.write(((value shr 16) and 0xffL).toInt())
+                out.write(((value shr 8) and 0xffL).toInt())
+                out.write((value and 0xffL).toInt())
+            }
+            value < 0x1_0000_0000L -> {
+                out.write(0xf0)
+                out.write(((value shr 24) and 0xffL).toInt())
+                out.write(((value shr 16) and 0xffL).toInt())
+                out.write(((value shr 8) and 0xffL).toInt())
+                out.write((value and 0xffL).toInt())
+            }
+            else -> {
+                out.write(0xf4)
+                for (shift in 56 downTo 0 step 8) out.write(((value shr shift) and 0xffL).toInt())
+            }
+        }
+    }
+
     fun switchChannel(channelId: Int): Boolean {
         val output = controlOutput ?: return false
         val session = ownSession ?: return false
@@ -389,6 +474,7 @@ internal class MumbleClient(
     private fun clearConnectionState() {
         controlOutput = null
         ownSession = null
+        serverVersionV1 = null
         lastRequestedChannelId = null
         users.clear()
         try { socket?.close() } catch (_: Exception) {}
@@ -436,6 +522,7 @@ internal class MumbleClient(
         private const val MAX_CONTROL_FRAME_BYTES = 2_000_000
 
         private const val TYPE_VERSION = 0
+        private const val TYPE_UDP_TUNNEL = 1
         private const val TYPE_AUTHENTICATE = 2
         private const val TYPE_PING = 3
         private const val TYPE_REJECT = 4
@@ -445,5 +532,10 @@ internal class MumbleClient(
         private const val TYPE_USER_REMOVE = 8
         private const val TYPE_USER_STATE = 9
         private const val TYPE_PERMISSION_DENIED = 12
+
+        private const val PROTOBUF_UDP_VERSION = 0x010500
+        private const val UDP_TYPE_AUDIO = 0
+        private const val LEGACY_OPUS_HEADER = 4 shl 5
+        private const val LEGACY_TERMINATOR_BIT = 1L shl 13
     }
 }
