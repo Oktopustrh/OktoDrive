@@ -33,15 +33,100 @@ jobs:
           else
             echo "::warning::Persistent signing secret is not configured; this build will use Android's temporary debug key."
           fi
-      - name: Show full test build version in app and Mumble
+      - name: Embed test version and tunneled receive-audio probe
         shell: bash
         run: |
-          VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)
-          test -n "$VERSION"
-          DISPLAY_VERSION="${VERSION}.${GITHUB_RUN_NUMBER}"
-          echo "OktoDrive test build: $DISPLAY_VERSION"
-          sed -i "s/text(\"OktoDrive\", 28f/text(\"OktoDrive $DISPLAY_VERSION\", 28f/" app/src/main/java/no/oktodrive/app/MainActivity.kt
-          sed -i -E "s/\.setRelease\(\"OktoDrive [^\"]*\"\)/.setRelease(\"OktoDrive $DISPLAY_VERSION\")/" app/src/main/java/no/oktodrive/app/MumbleClient.kt
+          python3 <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          gradle = Path('app/build.gradle.kts')
+          g = gradle.read_text()
+          m = re.search(r'versionName\s*=\s*"([^"]+)"', g)
+          if not m:
+              raise SystemExit('versionName not found')
+          base = m.group(1)
+          display = f"{base}.{os.environ['GITHUB_RUN_NUMBER']}"
+          g = g[:m.start(1)] + display + g[m.end(1):]
+          gradle.write_text(g)
+          print(f'OktoDrive test build: {display}')
+
+          main = Path('app/src/main/java/no/oktodrive/app/MainActivity.kt')
+          s = main.read_text()
+          old = 'addView(text("OktoDrive", 28f, navy, true))'
+          new = f'addView(text("OktoDrive\\n{display}", 28f, navy, true))'
+          if old not in s:
+              raise SystemExit('OktoDrive title marker not found')
+          main.write_text(s.replace(old, new, 1))
+
+          mumble = Path('app/src/main/java/no/oktodrive/app/MumbleClient.kt')
+          s = mumble.read_text()
+          s, n = re.subn(
+              r'\.setRelease\("OktoDrive [^"]*"\)',
+              f'.setRelease("OktoDrive {display}")',
+              s,
+              count=1,
+          )
+          if n != 1:
+              raise SystemExit('Mumble release marker not found')
+
+          import_marker = 'import no.oktodrive.app.proto.udp.Audio as UdpAudio\n'
+          if 'import no.oktodrive.app.proto.udp.Ping as UdpPing' not in s:
+              if import_marker not in s:
+                  raise SystemExit('UDP Audio import marker not found')
+              s = s.replace(
+                  import_marker,
+                  import_marker + 'import no.oktodrive.app.proto.udp.Ping as UdpPing\n',
+                  1,
+              )
+
+          sync_marker = '                ownSession = if (sync.hasSession()) sync.session else null\n'
+          if 'forceTcpTunnel()' not in s:
+              if sync_marker not in s:
+                  raise SystemExit('ServerSync marker not found')
+              s = s.replace(
+                  sync_marker,
+                  sync_marker + '                forceTcpTunnel()\n',
+                  1,
+              )
+
+          method_marker = '    private fun handleIncomingVoicePacket(packet: ByteArray) {\n'
+          if 'private fun forceTcpTunnel()' not in s:
+              if method_marker not in s:
+                  raise SystemExit('incoming voice marker not found')
+              method = '''    private fun forceTcpTunnel() {
+        val output = controlOutput ?: return
+        try {
+            val ping = UdpPing.newBuilder()
+                .setTimestamp(System.currentTimeMillis())
+                .build()
+                .toByteArray()
+            val packet = ByteArray(ping.size + 1)
+            packet[0] = UDP_TYPE_PING.toByte()
+            ping.copyInto(packet, destinationOffset = 1)
+            send(output, TYPE_UDP_TUNNEL, packet)
+            Log.i(TAG, "Sent tunneled UDP ping; receive audio should stay on TCP tunnel")
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not request tunneled receive audio", e)
+        }
+    }
+
+'''
+              s = s.replace(method_marker, method + method_marker, 1)
+
+          const_marker = '        private const val UDP_TYPE_AUDIO = 0\n'
+          if 'private const val UDP_TYPE_PING = 1' not in s:
+              if const_marker not in s:
+                  raise SystemExit('UDP audio constant marker not found')
+              s = s.replace(
+                  const_marker,
+                  const_marker + '        private const val UDP_TYPE_PING = 1\n',
+                  1,
+              )
+
+          mumble.write_text(s)
+          PY
       - name: Install Android SDK packages
         shell: bash
         run: |
