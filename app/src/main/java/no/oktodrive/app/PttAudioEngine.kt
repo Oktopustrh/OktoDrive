@@ -28,7 +28,10 @@ internal class PttAudioEngine(
     fun isRunning(): Boolean = running.get()
 
     @Suppress("MissingPermission")
+    @Synchronized
     fun start(): Boolean {
+        // Do not restart until the previous worker has released its recorder.
+        if (worker?.isAlive == true) return running.get()
         if (!running.compareAndSet(false, true)) return true
 
         val minBuffer = AudioRecord.getMinBufferSize(
@@ -115,6 +118,7 @@ internal class PttAudioEngine(
         return true
     }
 
+    @Synchronized
     fun stop() {
         if (!running.compareAndSet(true, false)) return
         try {
