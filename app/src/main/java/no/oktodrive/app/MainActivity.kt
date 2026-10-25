@@ -587,7 +587,7 @@ class MainActivity : Activity() {
                             "Grensesnitt: Mobil" -> setUiMode(UiMode.MOBILE)
                             "Grensesnitt: Radio" -> setUiMode(UiMode.RADIO)
                             "Glem lagret serversertifikat" -> {
-                                val host = prefs.getString("host", "") ?: ""
+                                val host = prefs.getString("host", "ts.veiensvenner.no") ?: "ts.veiensvenner.no"
                                 val port = prefs.getString("port", "64738") ?: "64738"
                                 val pinKey = "cert_sha256_${host.lowercase()}:$port"
                                 AlertDialog.Builder(this@MainActivity)
@@ -624,8 +624,8 @@ class MainActivity : Activity() {
 
         val (addressBox, addressInput) = field(
             "Adresse",
-            prefs.getString("host", "") ?: "",
-            hint = "mumble.example.no"
+            prefs.getString("host", "ts.veiensvenner.no") ?: "ts.veiensvenner.no",
+            hint = "ts.veiensvenner.no"
         )
         serverCard.addView(addressBox)
         serverCard.addView(spacer(10))
