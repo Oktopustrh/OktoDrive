@@ -15,6 +15,11 @@ class OktoDriveApp : Application() {
         @Volatile
         private lateinit var appContext: Context
 
+        internal fun context(): Context {
+            check(::appContext.isInitialized) { "OktoDriveApp context is not initialized" }
+            return appContext
+        }
+
         fun startConnectionProtection() {
             if (!::appContext.isInitialized) return
             val intent = Intent(appContext, MumbleForegroundService::class.java)
