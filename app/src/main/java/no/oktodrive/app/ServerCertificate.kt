@@ -19,8 +19,8 @@ import javax.net.ssl.X509TrustManager
  * Mumble messages are transmitted during discovery. The user must verify the
  * fingerprint using an independent trusted channel before pinning.
  *
- * Every subsequent handshake validates the pinned leaf certificate. A changed
- * certificate is rejected, not silently accepted.
+ * Every TLS handshake also presents OktoDrive's persistent client identity so
+ * the Mumble server can register and recognize this installation later.
  */
 internal object ServerCertificate {
     fun fingerprint(cert: X509Certificate): String =
@@ -64,13 +64,21 @@ internal object ServerCertificate {
         throw lastError ?: IOException("Kunne ikke koble til $host:$port")
     }
 
+    private fun newContext(trustManager: X509TrustManager): SSLContext =
+        SSLContext.getInstance("TLS").apply {
+            init(
+                ClientIdentity.keyManagers(),
+                arrayOf<javax.net.ssl.TrustManager>(trustManager),
+                null
+            )
+        }
+
     private fun handshake(
         host: String,
         port: Int,
         trustManager: X509TrustManager
     ): X509Certificate {
-        val context = SSLContext.getInstance("TLS")
-        context.init(null, arrayOf<javax.net.ssl.TrustManager>(trustManager), null)
+        val context = newContext(trustManager)
         val socket = connectPreferred(context, host, port, 6000)
         socket.use {
             it.startHandshake()
@@ -127,8 +135,7 @@ internal object ServerCertificate {
                 }
             }
         }
-        val context = SSLContext.getInstance("TLS")
-        context.init(null, arrayOf<javax.net.ssl.TrustManager>(manager), null)
+        val context = newContext(manager)
         val socket = connectPreferred(context, host, port, 6000)
         try {
             socket.soTimeout = 12000
