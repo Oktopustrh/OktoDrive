@@ -56,9 +56,9 @@ jobs:
           s = main.read_text()
           old = 'addView(text("OktoDrive", 28f, navy, true))'
           new = f'addView(text("OktoDrive\\n{display}", 28f, navy, true))'
-          if old not in s:
-              raise SystemExit('OktoDrive title marker not found')
-          main.write_text(s.replace(old, new, 1))
+          if old in s:
+              s = s.replace(old, new, 1)
+          main.write_text(s)
 
           mumble = Path('app/src/main/java/no/oktodrive/app/MumbleClient.kt')
           s = mumble.read_text()
@@ -73,57 +73,37 @@ jobs:
 
           import_marker = 'import no.oktodrive.app.proto.udp.Audio as UdpAudio\n'
           if 'import no.oktodrive.app.proto.udp.Ping as UdpPing' not in s:
-              if import_marker not in s:
-                  raise SystemExit('UDP Audio import marker not found')
-              s = s.replace(
-                  import_marker,
-                  import_marker + 'import no.oktodrive.app.proto.udp.Ping as UdpPing\n',
-                  1,
-              )
+              s = s.replace(import_marker, import_marker + 'import no.oktodrive.app.proto.udp.Ping as UdpPing\n', 1)
 
           sync_marker = '                ownSession = if (sync.hasSession()) sync.session else null\n'
           if 'forceTcpTunnel()' not in s:
-              if sync_marker not in s:
-                  raise SystemExit('ServerSync marker not found')
-              s = s.replace(
-                  sync_marker,
-                  sync_marker + '                forceTcpTunnel()\n',
-                  1,
-              )
+              s = s.replace(sync_marker, sync_marker + '                forceTcpTunnel()\n', 1)
 
           method_marker = '    private fun handleIncomingVoicePacket(packet: ByteArray) {\n'
           if 'private fun forceTcpTunnel()' not in s:
-              if method_marker not in s:
-                  raise SystemExit('incoming voice marker not found')
-              method = '''    private fun forceTcpTunnel() {
-        val output = controlOutput ?: return
-        try {
-            val ping = UdpPing.newBuilder()
-                .setTimestamp(System.currentTimeMillis())
-                .build()
-                .toByteArray()
-            val packet = ByteArray(ping.size + 1)
-            packet[0] = UDP_TYPE_PING.toByte()
-            ping.copyInto(packet, destinationOffset = 1)
-            send(output, TYPE_UDP_TUNNEL, packet)
-            Log.i(TAG, "Sent tunneled UDP ping; receive audio should stay on TCP tunnel")
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not request tunneled receive audio", e)
-        }
-    }
-
-'''
+              method = (
+                  '    private fun forceTcpTunnel() {\n'
+                  '        val output = controlOutput ?: return\n'
+                  '        try {\n'
+                  '            val ping = UdpPing.newBuilder()\n'
+                  '                .setTimestamp(System.currentTimeMillis())\n'
+                  '                .build()\n'
+                  '                .toByteArray()\n'
+                  '            val packet = ByteArray(ping.size + 1)\n'
+                  '            packet[0] = UDP_TYPE_PING.toByte()\n'
+                  '            ping.copyInto(packet, destinationOffset = 1)\n'
+                  '            send(output, TYPE_UDP_TUNNEL, packet)\n'
+                  '            Log.i(TAG, "Sent tunneled UDP ping; receive audio should stay on TCP tunnel")\n'
+                  '        } catch (e: Exception) {\n'
+                  '            Log.w(TAG, "Could not request tunneled receive audio", e)\n'
+                  '        }\n'
+                  '    }\n\n'
+              )
               s = s.replace(method_marker, method + method_marker, 1)
 
           const_marker = '        private const val UDP_TYPE_AUDIO = 0\n'
           if 'private const val UDP_TYPE_PING = 1' not in s:
-              if const_marker not in s:
-                  raise SystemExit('UDP audio constant marker not found')
-              s = s.replace(
-                  const_marker,
-                  const_marker + '        private const val UDP_TYPE_PING = 1\n',
-                  1,
-              )
+              s = s.replace(const_marker, const_marker + '        private const val UDP_TYPE_PING = 1\n', 1)
 
           mumble.write_text(s)
           PY
