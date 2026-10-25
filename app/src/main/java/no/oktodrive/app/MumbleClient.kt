@@ -35,6 +35,7 @@ internal class MumbleClient(
         fun onActiveChannel(channelId: Int)
         fun onError(message: String)
         fun onUsers(users: List<User>) {}
+        fun onVoice(session: Int, finished: Boolean) {}
     }
 
     data class Channel(val id: Int, val name: String, val parent: Int?)
@@ -308,6 +309,7 @@ internal class MumbleClient(
         val audio = UdpAudio.parseFrom(packet.copyOfRange(1, packet.size))
         val sender = audio.senderSession
         if (sender == 0) return
+        listener.onVoice(sender, audio.isTerminator)
         playback.enqueue(
             PlaybackAudioEngine.Frame(
                 senderSession = sender,
@@ -333,6 +335,7 @@ internal class MumbleClient(
             throw IOException("Invalid legacy Opus frame size=$opusSize packet=${packet.size}")
         }
 
+        listener.onVoice(session.toInt(), terminator)
         playback.enqueue(
             PlaybackAudioEngine.Frame(
                 senderSession = session.toInt(),
