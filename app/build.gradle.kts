@@ -53,6 +53,7 @@ android {
 dependencies {
     implementation("com.google.protobuf:protobuf-javalite:3.25.5")
     implementation("io.voxkit:kopus:1.0.1")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
     testImplementation("junit:junit:4.13.2")
 }
 
