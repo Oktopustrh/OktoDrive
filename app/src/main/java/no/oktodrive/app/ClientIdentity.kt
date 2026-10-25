@@ -21,7 +21,10 @@ import javax.security.auth.x500.X500Principal
  */
 internal object ClientIdentity {
     private const val KEYSTORE = "AndroidKeyStore"
-    private const val ALIAS = "oktodrive-mumble-client"
+    // v2 intentionally forces regeneration after the first TLS client-auth
+    // implementation used RSA-PSS, which is not reliable with Conscrypt/
+    // AndroidKeyStore during the Mumble handshake on all devices.
+    private const val ALIAS = "oktodrive-mumble-client-v2"
 
     fun keyManagers(): Array<KeyManager> {
         val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
@@ -48,11 +51,12 @@ internal object ClientIdentity {
             KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
         )
             .setKeySize(2048)
-            .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA512)
-            .setSignaturePaddings(
-                KeyProperties.SIGNATURE_PADDING_RSA_PKCS1,
-                KeyProperties.SIGNATURE_PADDING_RSA_PSS
+            .setDigests(
+                KeyProperties.DIGEST_SHA256,
+                KeyProperties.DIGEST_SHA384,
+                KeyProperties.DIGEST_SHA512
             )
+            .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
             .setCertificateSubject(X500Principal("CN=OktoDrive Mumble Client"))
             .setCertificateSerialNumber(serial)
             .setCertificateNotBefore(notBefore)
