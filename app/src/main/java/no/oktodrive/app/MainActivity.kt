@@ -54,12 +54,14 @@ class MainActivity : Activity() {
     private var pttAudioEngine: PttAudioEngine? = null
     private var pttTransmitting = false
 
-    private val navy = Color.rgb(10, 49, 105)
-    private val blue = Color.rgb(25, 118, 210)
-    private val paleBlue = Color.rgb(235, 246, 255)
-    private val border = Color.rgb(199, 214, 232)
-    private val muted = Color.rgb(88, 112, 145)
-    private val disabledText = Color.rgb(150, 164, 184)
+    private val navy = Color.rgb(207, 219, 235)
+    private val surface = Color.rgb(10, 18, 30)
+    private val profileControls = mutableListOf<View>()
+    private val blue = Color.rgb(36, 76, 118)
+    private val paleBlue = Color.rgb(8, 16, 27)
+    private val border = Color.rgb(39, 55, 75)
+    private val muted = Color.rgb(145, 162, 183)
+    private val disabledText = Color.rgb(113, 129, 149)
 
     private val releaseApi: String
         get() = if (packageName.endsWith(".dev"))
@@ -423,7 +425,7 @@ class MainActivity : Activity() {
                 isEnabled = mumbleConnected
                 setTextColor(if (mumbleConnected) navy else disabledText)
                 background = rounded(
-                    if (isActive) paleBlue else Color.WHITE,
+                    if (isActive) paleBlue else surface,
                     10,
                     if (isActive) blue else border,
                     if (isActive) 2 else 1
@@ -527,7 +529,7 @@ class MainActivity : Activity() {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(10))
-            background = rounded(Color.WHITE, 12, if (focused) blue else border, if (focused) 2 else 1)
+            background = rounded(surface, 12, if (focused) blue else border, if (focused) 2 else 1)
             addView(text(label, 14f, if (focused) blue else muted))
             addView(input)
         }
@@ -604,7 +606,7 @@ class MainActivity : Activity() {
             mumbleConnected -> {
                 pttButton.text = "🎙  HOLD INNE FOR Å SNAKKE"
                 pttButton.setTextColor(Color.WHITE)
-                pttButton.background = rounded(navy, 12)
+                pttButton.background = rounded(blue, 12)
             }
             else -> {
                 pttButton.text = "🎙  PTT – KOBLE TIL FØRST"
@@ -627,15 +629,19 @@ class MainActivity : Activity() {
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(20), dp(18), dp(20), dp(18))
-        background = rounded(Color.WHITE, 18, Color.rgb(226, 235, 245))
+        background = rounded(surface, 18, border)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.statusBarColor = paleBlue
+        window.navigationBarColor = paleBlue
+        window.decorView.systemUiVisibility = 0
         showRadio()
         uiHandler.post(refreshSpeakers)
         if (!prefs.getBoolean("setup_complete", false)) showSetup()
+        else if (!prefs.contains("device_profile")) chooseDeviceProfile()
     }
 
     private fun actionButton(label: String, action: () -> Unit) = Button(this).apply {
@@ -644,10 +650,12 @@ class MainActivity : Activity() {
         isAllCaps = false
         minHeight = dp(48)
         setTextColor(navy)
+        background = rounded(surface, 12, border)
         setOnClickListener { action() }
     }
 
     private fun showRadio() {
+        profileControls.clear()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(8), dp(16), dp(12))
@@ -693,6 +701,7 @@ class MainActivity : Activity() {
         navigation.addView(actionButton("− Kanal") { changeChannel(-1) }, LinearLayout.LayoutParams(0, -2, 1f))
         navigation.addView(actionButton("Kanal +") { changeChannel(1) }, LinearLayout.LayoutParams(0, -2, 1f))
         display.addView(navigation)
+        profileControls.add(navigation)
         pttButton = Button(this).apply {
             textSize = 18f; minHeight = dp(72); isAllCaps = false
             setOnTouchListener { _, event ->
@@ -706,12 +715,33 @@ class MainActivity : Activity() {
         controls.addView(pttButton)
         muteButton = actionButton("Høyttaler") { toggleSpeakerMute() }
         controls.addView(muteButton)
+        profileControls.add(pttButton)
+        profileControls.add(muteButton)
+        applyDeviceProfile()
         connectButton = actionButton("Koble til") {
             if (mumbleConnected) { stopPtt(); mumble?.disconnect() } else connectSaved()
         }
         controls.addView(connectButton)
         updatePttButton()
         updateMuteButton()
+    }
+
+    private fun applyDeviceProfile() {
+        val visibility = if (prefs.getString("device_profile", "mobile") == "radio") View.GONE else View.VISIBLE
+        profileControls.forEach { it.visibility = visibility }
+    }
+
+    private fun chooseDeviceProfile(onChosen: (() -> Unit)? = null) {
+        stopPtt()
+        AlertDialog.Builder(this)
+            .setTitle("Velg enhetsprofil")
+            .setItems(arrayOf("Radio – fysiske knapper", "Mobil – skjermknapper")) { _, index ->
+                prefs.edit().putString("device_profile", if (index == 0) "radio" else "mobile").apply()
+                applyDeviceProfile()
+                onChosen?.invoke()
+            }
+            .setCancelable(prefs.contains("device_profile") && onChosen == null)
+            .show()
     }
 
     private fun connectSaved() {
@@ -735,7 +765,10 @@ class MainActivity : Activity() {
                 if (name.isBlank()) { input.error = "Skriv inn navnet ditt"; return@setOnClickListener }
                 prefs.edit().putString("name", name).apply()
                 dialog.dismiss()
-                setupButton(0)
+                chooseDeviceProfile {
+                    if (prefs.getString("device_profile", "mobile") == "radio") setupButton(0)
+                    else setupButton(buttonActions.size)
+                }
             }
         }
         dialog.show()
@@ -765,8 +798,27 @@ class MainActivity : Activity() {
 
     private fun showSettings() {
         stopPtt()
-        AlertDialog.Builder(this).setTitle("Innstillinger")
-            .setItems(arrayOf("Navnet ditt", "Radioknapper", "Velg kanal", "Se etter oppdatering", "Avanserte serverinnstillinger", "Om OktoDrive")) { _, index ->
+        AlertDialog.Builder(this).setTitle("OktoDrive")
+            .setItems(arrayOf("Velg kanal", "Oppsett", "Om OktoDrive")) { _, index ->
+                when (index) {
+                    0 -> {
+                        val available = channels.toList()
+                        AlertDialog.Builder(this).setTitle("Velg kanal")
+                            .setItems(available.map { it.name }.toTypedArray()) { _, i ->
+                                if (mumbleConnected) mumble?.switchChannel(available[i].id)
+                            }.setNegativeButton("Tilbake") { _, _ -> showSettings() }.show()
+                    }
+                    1 -> showSetupSettings()
+                    2 -> AlertDialog.Builder(this).setTitle("Om OktoDrive")
+                        .setMessage(packageManager.getPackageInfo(packageName, 0).versionName)
+                        .setPositiveButton("Tilbake") { _, _ -> showSettings() }.show()
+                }
+            }.setNegativeButton("Lukk", null).show()
+    }
+
+    private fun showSetupSettings() {
+        AlertDialog.Builder(this).setTitle("Oppsett")
+            .setItems(arrayOf("Navnet ditt", "Radioknapper", "Enhetsprofil", "Avanserte serverinnstillinger", "Se etter oppdatering")) { _, index ->
                 when (index) {
                     0 -> {
                         val (box, input) = field("Navnet ditt", prefs.getString("name", "").orEmpty())
@@ -783,17 +835,11 @@ class MainActivity : Activity() {
                         dialog.show()
                     }
                     1 -> configureButtons()
-                    2 -> AlertDialog.Builder(this).setTitle("Velg kanal")
-                        .setItems(channels.map { it.name }.toTypedArray()) { _, i ->
-                            if (mumbleConnected) mumble?.switchChannel(channels[i].id)
-                        }.setNegativeButton("Lukk", null).show()
-                    3 -> checkForUpdates(true)
-                    4 -> serverSettings()
-                    5 -> AlertDialog.Builder(this).setTitle("OktoDrive")
-                        .setMessage(packageManager.getPackageInfo(packageName, 0).versionName)
-                        .setPositiveButton("OK", null).show()
+                    2 -> chooseDeviceProfile()
+                    3 -> serverSettings()
+                    4 -> checkForUpdates(true)
                 }
-            }.setNegativeButton("Lukk", null).show()
+            }.setNegativeButton("Tilbake") { _, _ -> showSettings() }.show()
     }
 
     private fun serverSettings() {

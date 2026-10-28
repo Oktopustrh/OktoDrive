@@ -12,7 +12,7 @@
         android:label="OktoDrive"
         android:icon="@drawable/oktodrive_launcher"
         android:roundIcon="@drawable/oktodrive_launcher"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:theme="@android:style/Theme.Material.NoActionBar"
         android:usesCleartextTraffic="false">
 
         <service

@@ -71,18 +71,18 @@ internal class PttAudioEngine(
                 encoder = activeEncoder
                 val pcm = ShortArray(FRAME_SAMPLES)
                 val encoded = ByteArray(OpusEncoder.DEFAULT_OUTPUT_BUFFER_SIZE)
+                if (!running.get()) return@Thread
                 audioRecord.startRecording()
+                check(audioRecord.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    "Mikrofonen startet ikke opptak"
+                }
+                if (!running.get()) return@Thread
                 onState("PTT sender")
 
                 while (running.get()) {
-                    var filled = 0
-                    while (running.get() && filled < FRAME_SAMPLES) {
-                        val read = audioRecord.read(pcm, filled, FRAME_SAMPLES - filled)
-                        if (read < 0) throw IllegalStateException("AudioRecord.read feilet: $read")
-                        if (read == 0) continue
-                        filled += read
-                    }
-                    if (!running.get() || filled != FRAME_SAMPLES) break
+                    if (!PcmFrameReader.fill(pcm, { running.get() }) { buffer, offset, size ->
+                        audioRecord.read(buffer, offset, size)
+                    }) break
 
                     val encodedLength = activeEncoder.encode(pcm, FRAME_SAMPLES, encoded)
                     if (encodedLength <= 0) continue
@@ -93,8 +93,12 @@ internal class PttAudioEngine(
                     frameNumber += 1
                 }
             } catch (t: Throwable) {
-                Log.e(TAG, "PTT capture failed", t)
-                onState("PTT-feil: ${t.localizedMessage ?: t.javaClass.simpleName}")
+                if (running.get()) {
+                    Log.e(TAG, "PTT capture failed", t)
+                    onState("PTT-feil: ${t.localizedMessage ?: t.javaClass.simpleName}")
+                } else {
+                    Log.d(TAG, "Capture ended after PTT release", t)
+                }
             } finally {
                 try {
                     sendFrame(ByteArray(0), frameNumber, true)
