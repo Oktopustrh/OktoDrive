@@ -1,5 +1,9 @@
 # OktoDrive
 
+Copyright © 2026 Odd Skaset / Oktopus Design. All rights reserved.
+
+OktoDrive is proprietary software. Source code may not be copied, modified, distributed, sublicensed, sold, published, or used to create derivative works without prior written permission from the copyright holder, except where such restriction is prohibited by applicable law. See `LICENSE`.
+
 Android Mumble client project for radio-style communication.
 
 ## Goals
