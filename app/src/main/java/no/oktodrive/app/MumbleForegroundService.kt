@@ -20,9 +20,10 @@ class MumbleForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_START) {
+        if (intent == null || intent.action == ACTION_START) {
             startAsForeground()
             acquireWakeLock()
+            RadioSession.restoreIfNeeded()
         }
         return START_STICKY
     }
@@ -33,6 +34,7 @@ class MumbleForegroundService : Service() {
         } catch (_: Exception) {
         }
         wakeLock = null
+        RadioSession.stop(stopProtection = false)
         super.onDestroy()
     }
 
@@ -96,8 +98,8 @@ class MumbleForegroundService : Service() {
 
         return builder
             .setSmallIcon(R.drawable.oktodrive_launcher)
-            .setContentTitle("OktoDrive er tilkoblet")
-            .setContentText("Holder Mumble-forbindelsen aktiv når skjermen er av")
+            .setContentTitle("OktoDrive – radio aktiv")
+            .setContentText("Automatisk forbindelse. Avslutt radioen fra menyen i appen.")
             .setOngoing(true)
             .setContentIntent(pendingIntent)
             .build()
@@ -109,3 +111,4 @@ class MumbleForegroundService : Service() {
         private const val NOTIFICATION_ID = 1001
     }
 }
+

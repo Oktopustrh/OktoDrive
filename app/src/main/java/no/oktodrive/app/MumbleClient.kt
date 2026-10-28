@@ -68,11 +68,7 @@ internal class MumbleClient(
         Thread({
             var reconnectAttempt = 0
             var everConnected = false
-            try {
-                OktoDriveApp.startConnectionProtection()
-            } catch (e: Exception) {
-                Log.w(TAG, "Could not start foreground protection", e)
-            }
+
 
             try {
                 while (desiredConnected.get()) {
@@ -170,11 +166,6 @@ internal class MumbleClient(
                 clearConnectionState()
                 playback.stop()
                 listener.onUsers(emptyList())
-                try {
-                    OktoDriveApp.stopConnectionProtection()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Could not stop foreground protection", e)
-                }
                 listener.onStatus(if (everConnected) "Frakoblet" else "Ikke tilkoblet", false)
             }
         }, "OktoDrive-Mumble").start()
@@ -478,6 +469,8 @@ internal class MumbleClient(
         return true
     }
 
+    fun isActive(): Boolean = desiredConnected.get() || workerRunning.get()
+
     fun disconnect() {
         desiredConnected.set(false)
         try { socket?.close() } catch (_: Exception) {}
@@ -557,3 +550,4 @@ internal class MumbleClient(
         private const val LEGACY_SIZE_MASK = (1L shl 13) - 1
     }
 }
+

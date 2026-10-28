@@ -3,7 +3,10 @@ package no.oktodrive.app
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -16,6 +19,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
@@ -38,12 +42,12 @@ class MainActivity : Activity() {
 
     private val prefs by lazy { getSharedPreferences("server_settings", MODE_PRIVATE) }
 
-    private var mumble: MumbleClient? = null
+    private val mumble: MumbleClient? get() = RadioSession.client
+    private var sessionObserver: MumbleClient.Listener? = null
     private lateinit var channelList: LinearLayout
     private lateinit var activeChannelText: TextView
     private lateinit var muteButton: Button
     private lateinit var pttButton: Button
-    private lateinit var connectButton: Button
     private lateinit var connectionStatus: TextView
     private var mumbleConnected = false
     private var channels: List<MumbleClient.Channel> = emptyList()
@@ -82,7 +86,188 @@ class MainActivity : Activity() {
         override fun run() { updateSpeaker(); uiHandler.postDelayed(this, 250) }
     }
 
+    private val touchLock = TouchLockState()
+    private lateinit var touchShield: TextView
+    private var activityResumed = false
+    private var windowHasFocus = false
+    private var unlockTouchX = 0f
+    private var unlockTouchY = 0f
+    private val holdToUnlock = Runnable { unlockTouchScreen() }
+    private val lockTick = object : Runnable {
+        override fun run() {
+            val enabled = prefs.getBoolean("touch_lock", false)
+            val ready = prefs.getBoolean("setup_complete", false) && !settingUp && !learning &&
+                !prefs.getBoolean("radio_exited", false)
+            touchLock.tick(android.os.SystemClock.elapsedRealtime(), enabled, ready,
+                activityResumed && windowHasFocus)
+            renderTouchLock()
+            uiHandler.postDelayed(this, 250)
+        }
+    }
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> touchLock.screenOff()
+                Intent.ACTION_SCREEN_ON -> if (touchLock.screenOn(android.os.SystemClock.elapsedRealtime()))
+                    renderTouchLock()
+            }
+        }
+    }
+
+    private fun renderTouchLock() {
+        if (!::touchShield.isInitialized) return
+        val locked = touchLock.locked && !prefs.getBoolean("radio_exited", false)
+        touchShield.visibility = if (locked) View.VISIBLE else View.GONE
+        if (locked) {
+            val channel = if (::activeChannelText.isInitialized) activeChannelText.text else "Radio"
+            val speaker = if (::speakerText.isInitialized) speakerText.text else ""
+            touchShield.text = "$channel\n$speaker\n\nBerøringslås\nPower av/på åpner skjermen.\nEller hold fingeren her i 3 sekunder.\nFysiske radioknapper er aktive."
+        }
+        val brightness = if (locked) 0.03f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        if (window.attributes.screenBrightness != brightness) {
+            window.attributes = window.attributes.apply { screenBrightness = brightness }
+        }
+    }
+
+    private fun unlockTouchScreen() {
+        uiHandler.removeCallbacks(holdToUnlock)
+        touchLock.unlock(android.os.SystemClock.elapsedRealtime())
+        renderTouchLock()
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN)
+            touchLock.touch(android.os.SystemClock.elapsedRealtime())
+        return super.dispatchTouchEvent(event)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        activityResumed = true
+        if (!settingUp && prefs.getBoolean("setup_complete", false) &&
+            !prefs.getBoolean("radio_exited", false) && sessionObserver != null &&
+            mumble?.isActive() != true) connectSaved()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.hasCategory(Intent.CATEGORY_LAUNCHER) && prefs.getBoolean("radio_exited", false)) {
+            prefs.edit().putBoolean("radio_exited", false).apply()
+            showRadio()
+            unlockTouchScreen()
+            connectSaved()
+        }
+    }
+
+    override fun onConfigurationChanged(config: android.content.res.Configuration) {
+        super.onConfigurationChanged(config)
+        if (prefs.getBoolean("radio_exited", false)) showStoppedRadio()
+        else {
+            showRadio()
+            sessionObserver?.let { RadioSession.attach(it) }
+            renderTouchLock()
+        }
+    }
+
+    @Deprecated("Back opens the radio menu; exit is an explicit menu action")
+    override fun onBackPressed() {
+        if (!touchLock.locked && !settingUp && !learning && !prefs.getBoolean("radio_exited", false))
+            showSettings()
+    }
+
+    private fun openAndroidSettings(action: String) {
+        stopPtt()
+        try { startActivity(Intent(action)) }
+        catch (_: android.content.ActivityNotFoundException) {
+            Toast.makeText(this, "Dette Android-oppsettet har ikke den innstillingssiden.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun chooseHomeApp() {
+        stopPtt()
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val roles = getSystemService(android.app.role.RoleManager::class.java)
+            if (roles != null && roles.isRoleAvailable(android.app.role.RoleManager.ROLE_HOME) &&
+                !roles.isRoleHeld(android.app.role.RoleManager.ROLE_HOME)) {
+                startActivityForResult(roles.createRequestRoleIntent(android.app.role.RoleManager.ROLE_HOME), 4201)
+                return
+            }
+        }
+        openAndroidSettings(android.provider.Settings.ACTION_HOME_SETTINGS)
+    }
+
+    private fun showRadioOptions() {
+        val auto = if (prefs.getBoolean("auto_start", false)) "På" else "Av"
+        val lock = if (prefs.getBoolean("touch_lock", false)) "10 sekunder" else "Av"
+        AlertDialog.Builder(this).setTitle("Radiodrift")
+            .setItems(arrayOf("Autostart ved omstart: $auto", "Bruk OktoDrive som startskjerm",
+                "Berøringslås: $lock", "Android-innstillinger")) { _, index ->
+                when (index) {
+                    0 -> {
+                        val enabled = !prefs.getBoolean("auto_start", false)
+                        prefs.edit().putBoolean("auto_start", enabled).apply()
+                        AlertDialog.Builder(this).setTitle(if (enabled) "Autostart på" else "Autostart av")
+                            .setMessage(if (enabled)
+                                "Velg OktoDrive som startskjerm for å åpne radioen ved oppstart og med Hjem-knappen. På eldre Android forsøkes også oppstart etter omstart. Androids skjermlås må eventuelt åpnes først."
+                                else "Oppstart etter omstart er slått av. Hvis OktoDrive er valgt som startskjerm, må du også velge en annen startskjerm i Android for å endre dette.")
+                            .setPositiveButton("Velg startskjerm") { _, _ -> chooseHomeApp() }
+                            .setNegativeButton("Tilbake") { _, _ -> showRadioOptions() }.show()
+                    }
+                    1 -> chooseHomeApp()
+                    2 -> AlertDialog.Builder(this).setTitle("Berøringslås for håndholdt")
+                        .setMessage("Låser berøring etter 10 sekunder uten skjermbruk og demper lyset. Fysiske radioknapper er aktive. Power av/på eller et hold på skjermen i 3 sekunder åpner igjen.\n\nDette er berøringslås i appen. PTT med helt avslått skjerm må testes separat på B8000 og hver radiomodell.")
+                        .setPositiveButton("Bruk 10 sekunder") { _, _ ->
+                            prefs.edit().putBoolean("touch_lock", true).apply(); unlockTouchScreen()
+                        }
+                        .setNeutralButton("Slå av") { _, _ ->
+                            prefs.edit().putBoolean("touch_lock", false).apply(); unlockTouchScreen()
+                        }.setNegativeButton("Avbryt", null).show()
+                    3 -> openAndroidSettings(android.provider.Settings.ACTION_SETTINGS)
+                }
+            }.setNegativeButton("Tilbake") { _, _ -> showSetupSettings() }.show()
+    }
+
+    private fun confirmExitRadio() {
+        AlertDialog.Builder(this).setTitle("Avslutt radioen?")
+            .setMessage("Dette kobler fra og stopper automatisk gjenoppkobling til du åpner radioen igjen.")
+            .setNegativeButton("Fortsett radio", null)
+            .setPositiveButton("Avslutt") { _, _ ->
+                prefs.edit().putBoolean("radio_exited", true).apply()
+                stopPtt()
+                RadioSession.detach(sessionObserver)
+                sessionObserver = null
+                RadioSession.stop()
+                unlockTouchScreen()
+                val home = packageManager.resolveActivity(
+                    Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), PackageManager.MATCH_DEFAULT_ONLY)
+                if (home?.activityInfo?.packageName == packageName) showStoppedRadio()
+                else finishAndRemoveTask()
+            }.show()
+    }
+
+    private fun showStoppedRadio() {
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            setBackgroundColor(paleBlue)
+            addView(text("Radioen er avsluttet", 26f, navy, true))
+            addView(actionButton("Start radioen") {
+                prefs.edit().putBoolean("radio_exited", false).apply()
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                showRadio(); unlockTouchScreen(); connectSaved()
+            })
+            addView(actionButton("Android-innstillinger") { openAndroidSettings(android.provider.Settings.ACTION_SETTINGS) })
+            addView(actionButton("Velg annen startskjerm") { openAndroidSettings(android.provider.Settings.ACTION_HOME_SETTINGS) })
+        }
+        setContentView(root)
+    }
+
     override fun onPause() {
+        activityResumed = false
         stopPtt()
         super.onPause()
     }
@@ -90,7 +275,10 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         uiHandler.removeCallbacks(refreshSpeakers)
         pttAudioEngine?.stop()
-        mumble?.disconnect()
+        RadioSession.detach(sessionObserver)
+        try { unregisterReceiver(screenReceiver) } catch (_: IllegalArgumentException) { }
+        uiHandler.removeCallbacks(lockTick)
+        uiHandler.removeCallbacks(holdToUnlock)
         super.onDestroy()
     }
 
@@ -261,7 +449,11 @@ class MainActivity : Activity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus) stopPtt()
+        windowHasFocus = hasFocus
+        if (!hasFocus) {
+            uiHandler.removeCallbacks(holdToUnlock)
+            stopPtt()
+        }
     }
 
     private fun applyTm7PlusButtons() {
@@ -342,7 +534,7 @@ class MainActivity : Activity() {
         }
         val caption = when {
             pttTransmitting -> "Du snakker"
-            !mumbleConnected -> "Koble til for å snakke"
+            !mumbleConnected -> "Venter på automatisk forbindelse"
             names.isNotEmpty() -> "Snakker nå\n" + names.joinToString(", ")
             else -> "Lytter …"
         }
@@ -350,8 +542,7 @@ class MainActivity : Activity() {
     }
 
     private fun startMumble(host: String, port: Int, name: String, password: String) {
-        connectButton.isEnabled = false
-        mumble = MumbleClient(host, port, name, password, object : MumbleClient.Listener {
+        val observer = object : MumbleClient.Listener {
             override fun onStatus(message: String, connected: Boolean) {
                 runOnUiThread {
                     mumbleConnected = connected
@@ -359,8 +550,6 @@ class MainActivity : Activity() {
                     connectionStatus.setTextColor(
                         if (connected) Color.rgb(25, 130, 65) else Color.rgb(190, 55, 45)
                     )
-                    connectButton.text = if (connected) "KOBLE FRA" else "KOBLE TIL MUMBLE"
-                    connectButton.isEnabled = connected || message != "Kobler til Mumble …"
                     if (!connected && message != "Kobler til Mumble …") {
                         stopPtt()
                         displayState.clear()
@@ -413,9 +602,11 @@ class MainActivity : Activity() {
                         .show()
                 }
             }
-        })
+        }
+        sessionObserver = observer
+        RadioSession.attach(observer)
+        RadioSession.start(host, port, name, password)
         mumble?.setSpeakerMuted(radioUiState.speakerMuted)
-        mumble?.connect()
     }
 
     private fun updateActiveChannelLabel() {
@@ -577,7 +768,7 @@ class MainActivity : Activity() {
 
     private fun startPtt() {
         if (!mumbleConnected) {
-            Toast.makeText(this, "Koble til Mumble først.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Radioen kobler til automatisk. Vent på forbindelse.", Toast.LENGTH_SHORT).show()
             return
         }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -626,7 +817,7 @@ class MainActivity : Activity() {
                 pttButton.background = rounded(blue, 12)
             }
             else -> {
-                pttButton.text = "🎙  PTT – KOBLE TIL FØRST"
+                pttButton.text = "🎙  VENTER PÅ FORBINDELSE"
                 pttButton.setTextColor(disabledText)
                 pttButton.background = rounded(Color.rgb(232, 239, 247), 12)
             }
@@ -651,6 +842,9 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        serverPassword = RadioSession.sessionPassword()
+        if (intent?.hasCategory(Intent.CATEGORY_LAUNCHER) == true)
+            prefs.edit().putBoolean("radio_exited", false).apply()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.statusBarColor = paleBlue
         window.navigationBarColor = paleBlue
@@ -662,9 +856,19 @@ class MainActivity : Activity() {
             !prefs.getBoolean("tm7_measured_buttons_v1", false)) {
             applyTm7PlusButtons()
         }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON)
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 33)
+            registerReceiver(screenReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        else @Suppress("DEPRECATION") registerReceiver(screenReceiver, filter)
+        touchLock.unlock(android.os.SystemClock.elapsedRealtime())
         uiHandler.post(refreshSpeakers)
-        if (!prefs.getBoolean("setup_complete", false)) showSetup()
-        else if (!prefs.contains("device_profile")) chooseDeviceProfile()
+        uiHandler.post(lockTick)
+        if (prefs.getBoolean("radio_exited", false)) showStoppedRadio()
+        else if (!prefs.getBoolean("setup_complete", false)) showSetup()
+        else if (!prefs.contains("device_profile")) chooseDeviceProfile { connectSaved() }
+        else connectSaved()
     }
 
     private fun actionButton(label: String, action: () -> Unit) = Button(this).apply {
@@ -693,14 +897,36 @@ class MainActivity : Activity() {
                 insets
             }
         }
-        setContentView(ScrollView(this).apply { isFillViewport = true; addView(root) })
+        val frame = FrameLayout(this)
+        frame.addView(ScrollView(this).apply { isFillViewport = true; addView(root) })
+        touchShield = text("Skjermen er låst\n\nTrykk power av og på for å åpne.\nEller hold fingeren her i 3 sekunder.\n\nFysisk PTT kan fortsatt brukes.", 20f, navy, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            setBackgroundColor(paleBlue)
+            isClickable = true
+            visibility = View.GONE
+            setOnTouchListener { _, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        unlockTouchX = event.x; unlockTouchY = event.y
+                        uiHandler.postDelayed(holdToUnlock, 3000)
+                    }
+                    MotionEvent.ACTION_MOVE -> if (kotlin.math.abs(event.x - unlockTouchX) > dp(20) ||
+                        kotlin.math.abs(event.y - unlockTouchY) > dp(20)) uiHandler.removeCallbacks(holdToUnlock)
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> uiHandler.removeCallbacks(holdToUnlock)
+                }
+                true
+            }
+        }
+        frame.addView(touchShield, FrameLayout.LayoutParams(-1, -1))
+        setContentView(frame)
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         header.addView(text("OktoDrive", 22f, navy, true), LinearLayout.LayoutParams(0, -2, 1f))
         header.addView(actionButton("⚙") { showSettings() }.apply {
             contentDescription = "Innstillinger"
         }, LinearLayout.LayoutParams(dp(56), dp(48)))
         root.addView(header)
-        connectionStatus = text("Ikke tilkoblet", 14f, muted)
+        connectionStatus = text("Kobler til automatisk …", 14f, muted)
         root.addView(connectionStatus)
         val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
         val display: LinearLayout
@@ -715,7 +941,7 @@ class MainActivity : Activity() {
         } else { display = root; controls = root }
         activeChannelText = text("Ingen kanal", 32f, navy, true).apply { gravity = Gravity.CENTER }
         display.addView(activeChannelText)
-        speakerText = text("Koble til for å snakke", 22f, navy).apply {
+        speakerText = text("Venter på automatisk forbindelse", 22f, navy).apply {
             gravity = Gravity.CENTER; minHeight = dp(64)
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
@@ -741,10 +967,6 @@ class MainActivity : Activity() {
         profileControls.add(pttButton)
         profileControls.add(muteButton)
         applyDeviceProfile()
-        connectButton = actionButton("Koble til") {
-            if (mumbleConnected) { stopPtt(); mumble?.disconnect() } else connectSaved()
-        }
-        controls.addView(connectButton)
         updatePttButton()
         updateMuteButton()
     }
@@ -758,8 +980,10 @@ class MainActivity : Activity() {
         stopPtt()
         AlertDialog.Builder(this)
             .setTitle("Velg enhetsprofil")
-            .setItems(arrayOf("Radio – fysiske knapper", "Mobil – skjermknapper")) { _, index ->
-                prefs.edit().putString("device_profile", if (index == 0) "radio" else "mobile").apply()
+            .setItems(arrayOf("Fastmontert radio", "Håndholdt / B8000 – lås etter 10 sek", "Mobil – skjermknapper")) { _, index ->
+                prefs.edit().putString("device_profile", if (index == 2) "mobile" else "radio")
+                    .putBoolean("touch_lock", index == 1).apply()
+                unlockTouchScreen()
                 applyDeviceProfile()
                 onChosen?.invoke()
             }
@@ -771,7 +995,6 @@ class MainActivity : Activity() {
         if (settingUp) return
         val name = prefs.getString("name", "").orEmpty().trim()
         if (name.isEmpty()) { showSetup(); return }
-        mumble?.disconnect()
         startMumble(prefs.getString("host", "ts.veiensvenner.no") ?: "ts.veiensvenner.no",
             prefs.getString("port", "64738")?.toIntOrNull() ?: 64738, name, serverPassword)
     }
@@ -803,15 +1026,14 @@ class MainActivity : Activity() {
             learnButton(buttonActions[index]) { setupButton(index + 1) }
         } else {
             AlertDialog.Builder(this).setTitle("Radioen er klar")
-                .setMessage("Trykk Koble til for å begynne. Gi tilgang til mikrofonen når du blir spurt. Du kan endre navn og knapper under tannhjulet.")
+                .setMessage("Radioen kobler til automatisk. Gi tilgang til mikrofonen når du blir spurt. Navn, knapper, autostart og skjermlås finnes under Oppsett.")
                 .setCancelable(false)
-                .setNegativeButton("Senere") { _, _ -> finishSetup(false) }
-                .setPositiveButton("Koble til") { _, _ -> finishSetup(true) }.show()
+                .setPositiveButton("Start radioen") { _, _ -> finishSetup(true) }.show()
         }
     }
 
     private fun finishSetup(connect: Boolean) {
-        prefs.edit().putBoolean("setup_complete", true).apply()
+        prefs.edit().putBoolean("setup_complete", true).putBoolean("radio_exited", false).apply()
         settingUp = false
         if (connect) {
             connectSaved()
@@ -823,7 +1045,7 @@ class MainActivity : Activity() {
     private fun showSettings() {
         stopPtt()
         AlertDialog.Builder(this).setTitle("OktoDrive")
-            .setItems(arrayOf("Velg kanal", "Oppsett", "Om OktoDrive")) { _, index ->
+            .setItems(arrayOf("Velg kanal", "Oppsett", "Om OktoDrive", "Avslutt radioen")) { _, index ->
                 when (index) {
                     0 -> {
                         val available = channels.toList()
@@ -836,13 +1058,14 @@ class MainActivity : Activity() {
                     2 -> AlertDialog.Builder(this).setTitle("Om OktoDrive")
                         .setMessage(packageManager.getPackageInfo(packageName, 0).versionName)
                         .setPositiveButton("Tilbake") { _, _ -> showSettings() }.show()
+                    3 -> confirmExitRadio()
                 }
             }.setNegativeButton("Lukk", null).show()
     }
 
     private fun showSetupSettings() {
         AlertDialog.Builder(this).setTitle("Oppsett")
-            .setItems(arrayOf("Navnet ditt", "Radioknapper", "Enhetsprofil", "Avanserte serverinnstillinger", "Se etter oppdatering")) { _, index ->
+            .setItems(arrayOf("Navnet ditt", "Radioknapper", "Enhetsprofil", "Avanserte serverinnstillinger", "Se etter oppdatering", "Radiodrift, autostart og skjermlås")) { _, index ->
                 when (index) {
                     0 -> {
                         val (box, input) = field("Navnet ditt", prefs.getString("name", "").orEmpty())
@@ -853,7 +1076,7 @@ class MainActivity : Activity() {
                                 val name = input.text.toString().trim()
                                 if (name.isBlank()) input.error = "Skriv inn navnet ditt"
                                 else { prefs.edit().putString("name", name).apply(); dialog.dismiss()
-                                    Toast.makeText(this, "Navnet brukes neste gang du kobler til.", Toast.LENGTH_LONG).show() }
+                                    connectSaved() }
                             }
                         }
                         dialog.show()
@@ -862,6 +1085,7 @@ class MainActivity : Activity() {
                     2 -> chooseDeviceProfile()
                     3 -> serverSettings()
                     4 -> checkForUpdates(true)
+                    5 -> showRadioOptions()
                 }
             }.setNegativeButton("Tilbake") { _, _ -> showSettings() }.show()
     }
@@ -886,7 +1110,7 @@ class MainActivity : Activity() {
                     prefs.edit().putString("host", host.text.toString().trim()).putString("port", number.toString()).apply()
                     serverPassword = password.text.toString()
                     dialog.dismiss()
-                    Toast.makeText(this, "Brukes neste gang du kobler til.", Toast.LENGTH_LONG).show()
+                    connectSaved()
                 }
             }
         }
@@ -897,3 +1121,4 @@ class MainActivity : Activity() {
         private const val REQUEST_RECORD_AUDIO = 4101
     }
 }
+
