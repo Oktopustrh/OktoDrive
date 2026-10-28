@@ -43,12 +43,14 @@ class MainActivity : Activity() {
     private var channels: List<MumbleClient.Channel> = emptyList()
     private var activeChannelId: Int? = null
 
-    private val navy = Color.rgb(10, 49, 105)
-    private val blue = Color.rgb(25, 118, 210)
-    private val paleBlue = Color.rgb(235, 246, 255)
-    private val border = Color.rgb(199, 214, 232)
-    private val muted = Color.rgb(88, 112, 145)
-    private val disabledText = Color.rgb(150, 164, 184)
+    private val navy = Color.rgb(207, 219, 235)
+    private val surface = Color.rgb(10, 18, 30)
+    private var mobileControls: View? = null
+    private val blue = Color.rgb(36, 76, 118)
+    private val paleBlue = Color.rgb(17, 34, 54)
+    private val border = Color.rgb(39, 55, 75)
+    private val muted = Color.rgb(145, 162, 183)
+    private val disabledText = Color.rgb(113, 129, 149)
 
     private val releaseApi = "https://api.github.com/repos/Oktopustrh/OktoDrive/releases/latest"
 
@@ -284,17 +286,22 @@ class MainActivity : Activity() {
             return
         }
 
-        channels.forEachIndexed { index, channel ->
+        // Keep a stable order; channel IDs do not imply server access permissions.
+        val activeIndex = channels.indexOfFirst { it.id == activeChannelId }
+        val visibleChannels = if (activeIndex >= 0) {
+            channels.subList((activeIndex - 1).coerceAtLeast(0), (activeIndex + 2).coerceAtMost(channels.size))
+        } else channels
+        visibleChannels.forEachIndexed { index, channel ->
             val isActive = channel.id == activeChannelId
             val button = Button(this).apply {
                 text = if (isActive) "✓  ${channel.name}" else channel.name
-                textSize = 16f
-                minHeight = dp(52)
+                textSize = if (isActive) 24f else 16f
+                minHeight = dp(if (isActive) 76 else 52)
                 isAllCaps = false
                 isEnabled = mumbleConnected
                 setTextColor(if (mumbleConnected) navy else disabledText)
                 background = rounded(
-                    if (isActive) paleBlue else Color.WHITE,
+                    if (isActive) paleBlue else surface,
                     10,
                     if (isActive) blue else border,
                     if (isActive) 2 else 1
@@ -319,7 +326,7 @@ class MainActivity : Activity() {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 )
             )
-            if (index != channels.lastIndex) channelList.addView(spacer(6))
+            if (index != visibleChannels.lastIndex) channelList.addView(spacer(6))
         }
     }
 
@@ -372,7 +379,7 @@ class MainActivity : Activity() {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(10))
-            background = rounded(Color.WHITE, 12, if (focused) blue else border, if (focused) 2 else 1)
+            background = rounded(surface, 12, if (focused) blue else border, if (focused) 2 else 1)
             addView(text(label, 14f, if (focused) blue else muted))
             addView(input)
         }
@@ -382,17 +389,20 @@ class MainActivity : Activity() {
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(20), dp(18), dp(20), dp(18))
-        background = rounded(Color.WHITE, 18, Color.rgb(226, 235, 245))
+        background = rounded(surface, 18, border)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.statusBarColor = Color.rgb(4, 9, 17)
+        window.navigationBarColor = Color.rgb(4, 9, 17)
+        window.decorView.systemUiVisibility = 0
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(22))
-            setBackgroundColor(Color.rgb(247, 251, 255))
+            setBackgroundColor(Color.rgb(4, 9, 17))
         }
         val scroll = ScrollView(this).apply { addView(root) }
         setContentView(scroll)
@@ -435,11 +445,15 @@ class MainActivity : Activity() {
             setPadding(dp(14), dp(4), dp(14), dp(4))
             setOnClickListener { anchor ->
                 PopupMenu(this@MainActivity, anchor).apply {
+                    menu.add("Enhetsprofil")
+                    menu.add("Alle kanaler")
                     menu.add("Se etter oppdatering")
                     menu.add("Glem lagret serversertifikat")
                     menu.add("Om OktoDrive")
                     setOnMenuItemClickListener { item ->
                         when (item.title.toString()) {
+                            "Enhetsprofil" -> chooseDeviceProfile()
+                            "Alle kanaler" -> showAllChannels()
                             "Se etter oppdatering" -> checkForUpdates(manual = true)
                             "Glem lagret serversertifikat" -> {
                                 val host = prefs.getString("host", "") ?: ""
@@ -544,7 +558,7 @@ class MainActivity : Activity() {
             textSize = 16f
             minHeight = dp(58)
             setTextColor(Color.WHITE)
-            background = rounded(navy, 12)
+            background = rounded(blue, 12)
         }
         connectButton.setOnClickListener {
             if (mumbleConnected) {
@@ -598,11 +612,13 @@ class MainActivity : Activity() {
 
         channelCard.addView(
             Button(this).apply {
+                mobileControls = this
+                visibility = if (prefs.getString("device_profile", "mobile") == "radio") View.GONE else View.VISIBLE
                 text = "🎙   PTT – IKKE TILGJENGELIG ENNÅ"
                 isEnabled = false
                 textSize = 17f
                 minHeight = dp(82)
-                background = rounded(Color.rgb(232, 239, 247), 12)
+                background = rounded(paleBlue, 12)
                 setTextColor(disabledText)
             },
             LinearLayout.LayoutParams(
@@ -621,5 +637,34 @@ class MainActivity : Activity() {
         )
 
         root.addView(channelCard)
+        if (!prefs.contains("device_profile")) chooseDeviceProfile()
+    }
+
+    private fun chooseDeviceProfile() {
+        val profiles = arrayOf("Radio – fysiske knapper", "Mobil – skjermknapper")
+        AlertDialog.Builder(this)
+            .setTitle("Velg enhetsprofil")
+            .setSingleChoiceItems(profiles, if (prefs.getString("device_profile", "mobile") == "radio") 0 else 1) { dialog, index ->
+                prefs.edit().putString("device_profile", if (index == 0) "radio" else "mobile").apply()
+                mobileControls?.visibility = if (index == 0) View.GONE else View.VISIBLE
+                dialog.dismiss()
+            }
+            .setCancelable(prefs.contains("device_profile"))
+            .show()
+    }
+
+    private fun showAllChannels() {
+        if (!mumbleConnected || channels.isEmpty()) {
+            Toast.makeText(this, "Koble til Mumble først.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val available = channels.toList()
+        AlertDialog.Builder(this)
+            .setTitle("Alle kanaler")
+            .setItems(available.map { it.name }.toTypedArray()) { _, index ->
+                mumble?.switchChannel(available[index].id)
+            }
+            .setNegativeButton("Avbryt", null)
+            .show()
     }
 }
