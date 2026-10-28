@@ -7,7 +7,7 @@ plugins {
 android {
     namespace = "no.oktodrive.app"
     compileSdk = 35
-    defaultConfig { applicationId = "no.oktodrive.app"; minSdk = 24; targetSdk = 35; versionCode = 1012; versionName = "0.1.12" }
+    defaultConfig { applicationId = "no.oktodrive.app"; minSdk = 24; targetSdk = 35; versionCode = 1013; versionName = "0.1.13" }
 
     val releaseSigningPath = System.getenv("OKTODRIVE_KEYSTORE_PATH")
     val testSigningPath = System.getenv("OKTODRIVE_TEST_KEYSTORE_PATH")

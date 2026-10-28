@@ -264,10 +264,27 @@ class MainActivity : Activity() {
         if (!hasFocus) stopPtt()
     }
 
+    private fun applyTm7PlusButtons() {
+        stopPtt()
+        val editor = prefs.edit()
+        for ((action, key) in Tm7PlusButtons.bindings) {
+            editor.putInt("button_${action}_code", key.keyCode)
+                .putInt("button_${action}_scan", key.scanCode)
+        }
+        if (binding("mute") in Tm7PlusButtons.bindings.values) {
+            editor.remove("button_mute_code").remove("button_mute_scan")
+        }
+        editor.putBoolean("tm7_measured_buttons_v1", true).apply()
+    }
+
     private fun configureButtons() {
         stopPtt()
         AlertDialog.Builder(this).setTitle("Radioknapper")
             .setItems(buttonLabels.toTypedArray()) { _, index -> learnButton(buttonActions[index]) }
+            .setNeutralButton("Inrico TM-7 Plus") { _, _ ->
+                applyTm7PlusButtons()
+                Toast.makeText(this, "TM-7 Plus: PTT 230, pil opp 19, pil ned 20. Klart til bruk.", Toast.LENGTH_LONG).show()
+            }
             .setNegativeButton("Lukk", null).show()
     }
 
@@ -639,6 +656,12 @@ class MainActivity : Activity() {
         window.navigationBarColor = paleBlue
         window.decorView.systemUiVisibility = 0
         showRadio()
+        // Install the measured bindings once, including upgrades from an incorrect learned code.
+        // Later manual remapping is preserved; the preset can be restored in Radioknapper.
+        if (Tm7PlusButtons.isDevice(android.os.Build.MODEL) &&
+            !prefs.getBoolean("tm7_measured_buttons_v1", false)) {
+            applyTm7PlusButtons()
+        }
         uiHandler.post(refreshSpeakers)
         if (!prefs.getBoolean("setup_complete", false)) showSetup()
         else if (!prefs.contains("device_profile")) chooseDeviceProfile()
@@ -766,7 +789,8 @@ class MainActivity : Activity() {
                 prefs.edit().putString("name", name).apply()
                 dialog.dismiss()
                 chooseDeviceProfile {
-                    if (prefs.getString("device_profile", "mobile") == "radio") setupButton(0)
+                    if (prefs.getString("device_profile", "mobile") == "radio" &&
+                        !prefs.getBoolean("tm7_measured_buttons_v1", false)) setupButton(0)
                     else setupButton(buttonActions.size)
                 }
             }
