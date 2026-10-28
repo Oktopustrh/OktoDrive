@@ -129,5 +129,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: oktodrive-dev-apk
-          archive: false
+          archive: true
           path: app/build/outputs/apk/debug/*.apk
