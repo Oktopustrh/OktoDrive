@@ -798,8 +798,27 @@ class MainActivity : Activity() {
 
     private fun showSettings() {
         stopPtt()
-        AlertDialog.Builder(this).setTitle("Innstillinger")
-            .setItems(arrayOf("Navnet ditt", "Radioknapper", "Velg kanal", "Se etter oppdatering", "Avanserte serverinnstillinger", "Om OktoDrive", "Enhetsprofil")) { _, index ->
+        AlertDialog.Builder(this).setTitle("OktoDrive")
+            .setItems(arrayOf("Velg kanal", "Oppsett", "Om OktoDrive")) { _, index ->
+                when (index) {
+                    0 -> {
+                        val available = channels.toList()
+                        AlertDialog.Builder(this).setTitle("Velg kanal")
+                            .setItems(available.map { it.name }.toTypedArray()) { _, i ->
+                                if (mumbleConnected) mumble?.switchChannel(available[i].id)
+                            }.setNegativeButton("Tilbake") { _, _ -> showSettings() }.show()
+                    }
+                    1 -> showSetupSettings()
+                    2 -> AlertDialog.Builder(this).setTitle("Om OktoDrive")
+                        .setMessage(packageManager.getPackageInfo(packageName, 0).versionName)
+                        .setPositiveButton("Tilbake") { _, _ -> showSettings() }.show()
+                }
+            }.setNegativeButton("Lukk", null).show()
+    }
+
+    private fun showSetupSettings() {
+        AlertDialog.Builder(this).setTitle("Oppsett")
+            .setItems(arrayOf("Navnet ditt", "Radioknapper", "Enhetsprofil", "Avanserte serverinnstillinger", "Se etter oppdatering")) { _, index ->
                 when (index) {
                     0 -> {
                         val (box, input) = field("Navnet ditt", prefs.getString("name", "").orEmpty())
@@ -816,18 +835,11 @@ class MainActivity : Activity() {
                         dialog.show()
                     }
                     1 -> configureButtons()
-                    2 -> AlertDialog.Builder(this).setTitle("Velg kanal")
-                        .setItems(channels.map { it.name }.toTypedArray()) { _, i ->
-                            if (mumbleConnected) mumble?.switchChannel(channels[i].id)
-                        }.setNegativeButton("Lukk", null).show()
-                    3 -> checkForUpdates(true)
-                    4 -> serverSettings()
-                    6 -> chooseDeviceProfile()
-                    5 -> AlertDialog.Builder(this).setTitle("OktoDrive")
-                        .setMessage(packageManager.getPackageInfo(packageName, 0).versionName)
-                        .setPositiveButton("OK", null).show()
+                    2 -> chooseDeviceProfile()
+                    3 -> serverSettings()
+                    4 -> checkForUpdates(true)
                 }
-            }.setNegativeButton("Lukk", null).show()
+            }.setNegativeButton("Tilbake") { _, _ -> showSettings() }.show()
     }
 
     private fun serverSettings() {
