@@ -1,7 +1,12 @@
 name: Android build
+
 on:
   push:
-  pull_request:
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,6 +21,24 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+      - name: Prepare persistent test signing when configured
+        env:
+          KEYSTORE_BASE64: ${{ secrets.OKTODRIVE_KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          if [[ -n "$KEYSTORE_BASE64" ]]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/oktodrive-test.jks"
+            echo "OKTODRIVE_TEST_KEYSTORE_PATH=$RUNNER_TEMP/oktodrive-test.jks" >> "$GITHUB_ENV"
+            echo "Stable signing enabled for this development build."
+          else
+            echo "::warning::Persistent signing secret is not configured; this build will use Android's temporary debug key."
+          fi
+      - name: Show version in app header
+        shell: bash
+        run: |
+          VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)
+          test -n "$VERSION"
+          sed -i "s/text(\"OktoDrive\", 28f/text(\"OktoDrive $VERSION\", 28f/" app/src/main/java/no/oktodrive/app/MainActivity.kt
       - name: Install Android SDK packages
         shell: bash
         run: |
@@ -27,12 +50,16 @@ jobs:
           fi
           yes | "$SDKMANAGER" --licenses > /dev/null || true
           "$SDKMANAGER" --install 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
-      - name: Upload debug APK
+      - name: Test and build development APK
+        env:
+          OKTODRIVE_TEST_STORE_PASSWORD: ${{ secrets.OKTODRIVE_STORE_PASSWORD }}
+          OKTODRIVE_TEST_KEY_ALIAS: ${{ secrets.OKTODRIVE_KEY_ALIAS }}
+          OKTODRIVE_TEST_KEY_PASSWORD: ${{ secrets.OKTODRIVE_KEY_PASSWORD }}
+        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+      - name: Upload development APK
         if: success()
         uses: actions/upload-artifact@v7
         with:
-          name: oktodrive-debug-apk
+          name: oktodrive-dev-apk
           archive: false
           path: app/build/outputs/apk/debug/*.apk
